@@ -1,4 +1,4 @@
-export function page(title: string, body: string, userName?: string): string {
+export function page(title: string, body: string, userName?: string, isAdmin: boolean = false): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8,7 +8,7 @@ export function page(title: string, body: string, userName?: string): string {
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  ${userName ? sideMenu(userName) : ""}
+  ${userName ? sideMenu(userName, isAdmin) : ""}
   <div class="app-shell ${userName ? "with-sidebar" : ""}">
     ${userName ? "" : `<header class="site-header"><div class="container"><a href="/" class="logo">Leads & Orders</a></div></header>`}
     <main class="main-content">
@@ -20,14 +20,36 @@ export function page(title: string, body: string, userName?: string): string {
 </html>`;
 }
 
-function sideMenu(userName: string): string {
-  const items = [
+function sideMenu(userName: string, isAdmin: boolean): string {
+  const baseItems = [
     { href: "/dashboard", icon: "⊞", label: "Dashboard" },
     { href: "/leads", icon: "👤", label: "Leads" },
     { href: "/orders", icon: "📦", label: "Orders" },
     { href: "/products", icon: "🛍", label: "Products" },
-    { href: "/reports", icon: "📊", label: "Reports" },
+    ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
   ];
+
+  const renderItem = (i: { href: string; icon: string; label: string }) => `
+    <a href="${i.href}" class="sidebar-link" data-match="${i.href}">
+      <span class="sidebar-icon">${i.icon}</span>
+      <span class="sidebar-label">${escapeHtml(i.label)}</span>
+    </a>
+  `;
+
+  const reportsMenu = `
+    <div class="sidebar-group">
+      <a href="/reports" class="sidebar-link" data-match="/reports">
+        <span class="sidebar-icon">📊</span>
+        <span class="sidebar-label">Reports</span>
+        <span class="sidebar-chevron">▾</span>
+      </a>
+      <div class="sidebar-submenu">
+        ${renderItem({ href: "/reports", icon: "📊", label: "Overview" })}
+        ${renderItem({ href: "/reports/kg-sales", icon: "📈", label: "KG Sales" })}
+      </div>
+    </div>
+  `;
+
   return `
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
@@ -35,12 +57,8 @@ function sideMenu(userName: string): string {
       <button type="button" class="sidebar-close" id="sidebar-close" aria-label="Close menu">✕</button>
     </div>
     <nav class="sidebar-nav">
-      ${items.map(i => `
-        <a href="${i.href}" class="sidebar-link" data-match="${i.href}">
-          <span class="sidebar-icon">${i.icon}</span>
-          <span class="sidebar-label">${escapeHtml(i.label)}</span>
-        </a>
-      `).join("")}
+      ${baseItems.map(renderItem).join("")}
+      ${reportsMenu}
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-user">

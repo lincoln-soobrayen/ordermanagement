@@ -24,7 +24,10 @@ export async function initDb(): Promise<void> {
         email VARCHAR(255) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
         name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        role VARCHAR(50) NOT NULL DEFAULT 'salesperson',
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
@@ -177,15 +180,83 @@ export async function initDb(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
     `);
 
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'salesperson',
+      ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_user_role' AND conrelid = 'users'::regclass) THEN
+          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson'));
+        END IF;
+      END $$;
+    `);
+
+    // Migrate orders from old salesperson_id to user_id if the columns still exist
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='salesperson_id')
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='user_id') THEN
+          ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+          UPDATE orders
+          SET user_id = salespeople.user_id
+          FROM salespeople
+          WHERE orders.salesperson_id = salespeople.id
+            AND salespeople.user_id IS NOT NULL;
+          ALTER TABLE orders DROP COLUMN salesperson_id;
+        ELSIF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='user_id') THEN
+          ALTER TABLE orders ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS password_resets (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(255) UNIQUE NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_password_resets_token_hash ON password_resets(token_hash);
+    `);
+
+    // Drop legacy salespeople table if it exists
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='salespeople') THEN
+          DROP TABLE IF EXISTS salespeople CASCADE;
+        END IF;
+      END $$;
+    `);
+
     const existingUser = await client.query(
-      "SELECT id FROM users WHERE email = $1",
+      "SELECT id, role FROM users WHERE email = $1",
       ["admin@example.com"]
     );
     if (existingUser.rows.length === 0) {
       const hash = await bcrypt.hash("admin123", 10);
       await client.query(
-        "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3)",
-        ["admin@example.com", hash, "Administrator"]
+        "INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4)",
+        ["admin@example.com", hash, "Administrator", "admin"]
+      );
+    } else if (existingUser.rows[0].role !== "admin") {
+      await client.query(
+        "UPDATE users SET role = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        ["admin", existingUser.rows[0].id]
       );
     }
 
@@ -216,6 +287,7 @@ export interface Lead {
 export interface Order {
   id: number;
   lead_id: number | null;
+  user_id: number | null;
   customer_name: string;
   order_value: number;
   status: string;
@@ -227,6 +299,14 @@ export interface Order {
   notes: string | null;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface PasswordReset {
+  id: number;
+  user_id: number;
+  token_hash: string;
+  expires_at: Date;
+  created_at: Date;
 }
 
 export interface LeadComment {
@@ -267,5 +347,8 @@ export interface User {
   id: number;
   email: string;
   name: string;
+  role: string;
+  is_active: boolean;
   created_at: Date;
+  updated_at: Date;
 }

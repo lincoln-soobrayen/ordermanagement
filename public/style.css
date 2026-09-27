@@ -177,6 +177,43 @@ body {
   color: var(--primary);
 }
 
+.sidebar-group .sidebar-link {
+  justify-content: flex-start;
+}
+
+.sidebar-chevron {
+  margin-left: auto;
+  font-size: 0.75rem;
+  transition: transform 0.2s ease;
+}
+
+.sidebar-group.open .sidebar-chevron {
+  transform: rotate(180deg);
+}
+
+.sidebar-submenu {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 18px;
+  border-left: 2px solid var(--border);
+  margin-left: 22px;
+}
+
+.sidebar-group.open .sidebar-submenu,
+.sidebar-submenu:has(.sidebar-link.active) {
+  display: flex;
+}
+
+.sidebar-submenu .sidebar-link {
+  padding: 10px 14px;
+  font-size: 0.9rem;
+}
+
+.sidebar-submenu .sidebar-icon {
+  font-size: 0.95rem;
+}
+
 .sidebar-link.active {
   background: var(--primary);
   color: #fff;
@@ -652,6 +689,16 @@ form select {
 
 section {
   margin-bottom: 32px;
+}
+
+.chart-wrap {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  box-shadow: var(--shadow);
+  height: 360px;
 }
 
 .lead-summary {

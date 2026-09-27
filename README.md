@@ -63,12 +63,27 @@ A simple web app for tracking sales leads and orders. Built with Node.js, Expres
 
 5. **Open in browser**
 
-   Go to `http://localhost:3000` and sign in with:
+   Go to `http://localhost:3000` and sign in. The default admin account is created automatically on first run:
 
    - Email: `admin@example.com`
    - Password: `admin123`
 
-   Change the default password by creating a new user in the database.
+   Change the default password from **Users** after logging in, or use the **Forgot password?** link if SMTP is configured.
+
+## Password reset email
+
+To send password-reset links by email, set these variables in `.env`:
+
+```env
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your-smtp-user
+SMTP_PASS=your-smtp-password
+SMTP_FROM=noreply@example.com
+PASSWORD_RESET_URL_BASE=http://localhost:3000
+```
+
+If SMTP is not configured, reset links are printed to the console so you can still test the flow locally.
 
 ## Sharing on a network
 

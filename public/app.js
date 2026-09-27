@@ -19,12 +19,31 @@ document.addEventListener("DOMContentLoaded", () => {
   sidebarClose?.addEventListener("click", closeSidebar);
   overlay?.addEventListener("click", closeSidebar);
 
-  // Highlight current nav item
+  // Highlight current nav item and open its Reports submenu if active
   document.querySelectorAll(".sidebar-link").forEach((link) => {
     const match = link.getAttribute("data-match");
-    if (match && window.location.pathname.startsWith(match)) {
+    const insideSubmenu = link.closest(".sidebar-submenu");
+    const isActive = match && (
+      insideSubmenu
+        ? window.location.pathname === match
+        : window.location.pathname.startsWith(match)
+    );
+    if (isActive) {
       link.classList.add("active");
+      const group = link.closest(".sidebar-group");
+      if (group) group.classList.add("open");
     }
+  });
+
+  // Toggle Reports submenu when its parent link is clicked
+  document.querySelectorAll(".sidebar-group > .sidebar-link").forEach((toggler) => {
+    toggler.addEventListener("click", (e) => {
+      const group = toggler.closest(".sidebar-group");
+      if (!group) return;
+      if (group.querySelector(".sidebar-link.active")) return;
+      e.preventDefault();
+      group.classList.toggle("open");
+    });
   });
 
   // Auto-submit filter forms when status changes (keeps search button optional)
@@ -265,4 +284,53 @@ document.addEventListener("DOMContentLoaded", () => {
       setTimeout(() => alert.remove(), 500);
     });
   }, 4000);
+
+  // KG Sales bar chart
+  const kgSalesCanvas = document.getElementById("kg-sales-chart");
+  if (kgSalesCanvas && window.kgSalesData && window.kgSalesData.labels.length > 0) {
+    const { labels, data, groupBy } = window.kgSalesData;
+    const ctx = kgSalesCanvas.getContext("2d");
+    if (ctx && typeof Chart !== "undefined") {
+      const xTitle = groupBy === "day" ? "Day" : groupBy === "month" ? "Month" : "Year";
+      // eslint-disable-next-line no-undef
+      new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "KG Sold",
+              data,
+              backgroundColor: "rgba(79, 70, 229, 0.7)",
+              borderColor: "rgba(79, 70, 229, 1)",
+              borderWidth: 1,
+              borderRadius: 6,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (context) =>
+                  `${Number(context.parsed.y).toLocaleString(undefined, { maximumFractionDigits: 4 })} kg`,
+              },
+            },
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              title: { display: true, text: "KG Sold" },
+            },
+            x: {
+              title: { display: true, text: xTitle },
+            },
+          },
+        },
+      });
+    }
+  }
 });

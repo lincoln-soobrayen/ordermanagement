@@ -286,11 +286,13 @@ body {
   background: rgba(15, 23, 42, 0.4);
   z-index: 95;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.25s ease;
 }
 
 .sidebar-overlay.open {
   opacity: 1;
+  pointer-events: auto;
 }
 
 /* Main content */

@@ -1272,6 +1272,11 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
                 ? o.delivery_status.charAt(0).toUpperCase() + o.delivery_status.slice(1).replace(/_/g, " ")
                 : "Not shipped";
               const canDeliver = (o.delivery_status || "not_shipped") !== "delivered";
+              const markDeliveredButton = canDeliver
+                ? `<form method="post" action="/orders/${o.id}/deliver" class="inline" onsubmit="return confirm('Mark this order as delivered?')">
+                     <button type="submit" class="button small success">Mark Delivered</button>
+                   </form>`
+                : `<span class="badge">Delivered</span>`;
               const address = o.delivery_address || "—";
               const addressCell =
                 address.startsWith("http://") || address.startsWith("https://")
@@ -1295,13 +1300,7 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
               <button type="button" class="button small secondary copy-whatsapp" data-order-text="${escapeHtml(
                 whatsappOrderText(o as OrderWithLead, new Date(o.order_date || Date.now()).toLocaleDateString())
               )}">Copy</button>
-              ${
-                canDeliver
-                  ? `<form method="post" action="/orders/${o.id}/deliver" class="inline">
-                       <button type="submit" class="button small success">Mark Delivered</button>
-                     </form>`
-                  : `<span class="badge">Delivered</span>`
-              }
+              ${markDeliveredButton}
             </td>
           </tr>`;
             }

@@ -37,6 +37,10 @@ export function isAdmin(req: Request): boolean {
   return req.session.user?.role === "admin";
 }
 
+export function isDriver(req: Request): boolean {
+  return req.session.user?.role === "driver";
+}
+
 export function generatePasswordResetToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }

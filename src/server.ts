@@ -3,7 +3,7 @@ import session from "express-session";
 import path from "path";
 import dotenv from "dotenv";
 import { pool, initDb, Lead, Order, OrderItem, Product, User } from "./db";
-import { authenticateUser, isAdmin, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
+import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
 
 dotenv.config();
@@ -51,7 +51,23 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 function renderPage(title: string, body: string, req: Request): string {
   const f = flash(req);
   const wrappedBody = `${f.message ? alertHtml(f.message, f.type) : ""}${body}`;
-  return page(title, wrappedBody, req.session.user?.name, isAdmin(req));
+  return page(title, wrappedBody, req.session.user?.name, isAdmin(req), isDriver(req));
+}
+
+function requireDriverOnly(req: Request, res: Response, next: NextFunction): void {
+  if (req.session.user && isDriver(req)) {
+    next();
+  } else {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1><p>This page is for drivers only.</p>", req));
+  }
+}
+
+function blockDriver(req: Request, res: Response, next: NextFunction): void {
+  if (req.session.user && isDriver(req)) {
+    res.redirect("/deliveries");
+    return;
+  }
+  next();
 }
 
 interface FilterClause {
@@ -65,7 +81,7 @@ async function leadFilter(req: Request, alias: string = "leads"): Promise<Filter
 }
 
 async function orderFilter(req: Request, alias: string = "orders"): Promise<FilterClause> {
-  if (isAdmin(req)) return { where: "", params: [] };
+  if (isAdmin(req) || isDriver(req)) return { where: "", params: [] };
   return { where: ` AND ${alias}.user_id = $1`, params: [req.session.user!.id] };
 }
 
@@ -80,7 +96,23 @@ async function canAccessLead(req: Request, leadId: number): Promise<boolean> {
 
 async function canAccessOrder(req: Request, orderId: number): Promise<boolean> {
   if (isAdmin(req)) return true;
+  if (isDriver(req)) {
+    const result = await pool.query("SELECT 1 FROM orders WHERE id = $1 AND driver_id = $2", [
+      orderId,
+      req.session.user!.id,
+    ]);
+    return result.rows.length > 0;
+  }
   const result = await pool.query("SELECT 1 FROM orders WHERE id = $1 AND user_id = $2", [
+    orderId,
+    req.session.user!.id,
+  ]);
+  return result.rows.length > 0;
+}
+
+async function canAccessDelivery(req: Request, orderId: number): Promise<boolean> {
+  if (isAdmin(req) || !isDriver(req)) return true;
+  const result = await pool.query("SELECT 1 FROM orders WHERE id = $1 AND driver_id = $2", [
     orderId,
     req.session.user!.id,
   ]);
@@ -131,7 +163,11 @@ app.post("/login", async (req, res) => {
   const user = await authenticateUser(email, password);
   if (user) {
     req.session.user = user;
-    res.redirect("/dashboard");
+    if (user.role === "driver") {
+      res.redirect("/deliveries");
+    } else {
+      res.redirect("/dashboard");
+    }
   } else {
     setFlash(req, "Invalid email or password", "error");
     res.redirect("/login");
@@ -236,9 +272,9 @@ app.post("/reset-password", async (req, res) => {
   res.redirect("/login");
 });
 
-app.get("/", requireAuth, (req, res) => res.redirect("/dashboard"));
+app.get("/", requireAuth, blockDriver, (req, res) => res.redirect("/dashboard"));
 
-app.get("/dashboard", requireAuth, async (req, res) => {
+app.get("/dashboard", requireAuth, blockDriver, async (req, res) => {
   const leadF = await leadFilter(req);
   const orderF = await orderFilter(req);
 
@@ -374,9 +410,9 @@ function formatPeriodLabel(groupBy: string, period: string): string {
 }
 
 type OrderWithProduct = Partial<Order> & { product_id?: number };
-type OrderWithLead = Order & { lead_name?: string; owner_name?: string; owner_role?: string; product_id?: number; quantity_sachets?: number; quantity_cartons?: number; delivery_date_formatted?: string };
+type OrderWithLead = Order & { lead_name?: string; owner_name?: string; owner_role?: string; driver_name?: string; product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; delivery_date_formatted?: string };
 
-app.get("/leads", requireAuth, async (req, res) => {
+app.get("/leads", requireAuth, blockDriver, async (req, res) => {
   const { status, q } = req.query as { status?: string; q?: string };
   const leadF = await leadFilter(req);
   let where = "WHERE 1=1";
@@ -420,7 +456,7 @@ app.get("/leads", requireAuth, async (req, res) => {
   );
 });
 
-app.get("/leads/new", requireAuth, (req, res) => {
+app.get("/leads/new", requireAuth, blockDriver, (req, res) => {
   res.send(
     renderPage(
       "New Lead",
@@ -438,7 +474,7 @@ app.get("/leads/new", requireAuth, (req, res) => {
   );
 });
 
-app.post("/leads", requireAuth, async (req, res) => {
+app.post("/leads", requireAuth, blockDriver, async (req, res) => {
   const { name, company, email, phone, status, value, delivery_location, notes } = req.body;
   await pool.query(
     "INSERT INTO leads (name, company, email, phone, status, value, delivery_location, notes, assigned_to) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -448,7 +484,7 @@ app.post("/leads", requireAuth, async (req, res) => {
   res.redirect("/leads");
 });
 
-app.get("/leads/:id/edit", requireAuth, async (req, res) => {
+app.get("/leads/:id/edit", requireAuth, blockDriver, async (req, res) => {
   const result = await pool.query("SELECT * FROM leads WHERE id = $1", [req.params.id]);
   const lead = result.rows[0] as Lead | undefined;
   if (!lead) {
@@ -476,7 +512,7 @@ app.get("/leads/:id/edit", requireAuth, async (req, res) => {
   );
 });
 
-app.post("/leads/:id/update", requireAuth, async (req, res) => {
+app.post("/leads/:id/update", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessLead(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
@@ -490,7 +526,7 @@ app.post("/leads/:id/update", requireAuth, async (req, res) => {
   res.redirect("/leads");
 });
 
-app.post("/leads/:id/delete", requireAuth, async (req, res) => {
+app.post("/leads/:id/delete", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessLead(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
@@ -500,7 +536,7 @@ app.post("/leads/:id/delete", requireAuth, async (req, res) => {
   res.redirect("/leads");
 });
 
-app.get("/leads/:id/notes", requireAuth, async (req, res) => {
+app.get("/leads/:id/notes", requireAuth, blockDriver, async (req, res) => {
   const leadResult = await pool.query("SELECT * FROM leads WHERE id = $1", [
     req.params.id,
   ]);
@@ -585,7 +621,7 @@ app.get("/leads/:id/notes", requireAuth, async (req, res) => {
   );
 });
 
-app.post("/leads/:id/comments", requireAuth, async (req, res) => {
+app.post("/leads/:id/comments", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessLead(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
@@ -608,7 +644,7 @@ app.post("/leads/:id/comments", requireAuth, async (req, res) => {
   res.redirect(`/leads/${req.params.id}/notes`);
 });
 
-app.post("/leads/:id/comments/:commentId/delete", requireAuth, async (req, res) => {
+app.post("/leads/:id/comments/:commentId/delete", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessLead(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
@@ -675,7 +711,7 @@ function leadsTable(rows: Partial<Lead>[], actions = false): string {
     </table>`;
 }
 
-app.get("/orders", requireAuth, async (req, res) => {
+app.get("/orders", requireAuth, blockDriver, async (req, res) => {
   const { status, q } = req.query as { status?: string; q?: string };
   const orderF = await orderFilter(req, "o");
   let where = "WHERE 1=1";
@@ -719,7 +755,7 @@ app.get("/orders", requireAuth, async (req, res) => {
   );
 });
 
-app.get("/orders/new", requireAuth, async (req, res) => {
+app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
   const { lead_id, product_id } = req.query as { lead_id?: string; product_id?: string };
   let prefilled: Partial<Order> = {};
   const leadF = await leadFilter(req);
@@ -742,6 +778,7 @@ app.get("/orders/new", requireAuth, async (req, res) => {
       prefilled.user_id = meResult.rows[0].id;
     }
   }
+  const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
   if (lead_id) {
     const leadResult = await pool.query(
       "SELECT id, name, company, email, phone, value, delivery_location FROM leads WHERE id = $1",
@@ -778,7 +815,7 @@ app.get("/orders/new", requireAuth, async (req, res) => {
       `
       <h1>New Order</h1>
       <form method="post" action="/orders" class="form-grid">
-        ${orderFormFields(prefilled, leads.rows, products.rows, owners)}
+        ${orderFormFields(prefilled, leads.rows, products.rows, owners, drivers)}
         <div class="actions">
           <button type="submit">Save Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -789,8 +826,8 @@ app.get("/orders/new", requireAuth, async (req, res) => {
   );
 });
 
-app.post("/orders", requireAuth, async (req, res) => {
-  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes } = req.body;
+app.post("/orders", requireAuth, blockDriver, async (req, res) => {
+  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -815,10 +852,11 @@ app.post("/orders", requireAuth, async (req, res) => {
       }
     }
     const orderResult = await client.query(
-      "INSERT INTO orders (lead_id, user_id, customer_name, order_value, status, order_date, delivery_status, delivery_address, delivery_date, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+      "INSERT INTO orders (lead_id, user_id, driver_id, customer_name, order_value, status, order_date, delivery_status, delivery_address, delivery_date, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
       [
         lead_id || null,
         user_id || null,
+        driver_id || null,
         customer_name,
         finalOrderValue,
         "order_placed",
@@ -853,7 +891,7 @@ app.post("/orders", requireAuth, async (req, res) => {
   res.redirect("/orders");
 });
 
-app.get("/orders/:id/edit", requireAuth, async (req, res) => {
+app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
   const result = await pool.query("SELECT * FROM orders WHERE id = $1", [req.params.id]);
   const order = result.rows[0] as Order | undefined;
   if (!order) {
@@ -880,6 +918,7 @@ app.get("/orders/:id/edit", requireAuth, async (req, res) => {
     );
     owners = meResult.rows;
   }
+  const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
   const orderItemResult = await pool.query(
     "SELECT product_id, quantity_kg, quantity_sachets, quantity_cartons FROM order_items WHERE order_id = $1 LIMIT 1",
     [req.params.id]
@@ -897,7 +936,7 @@ app.get("/orders/:id/edit", requireAuth, async (req, res) => {
       `
       <h1>Edit Order</h1>
       <form method="post" action="/orders/${escapeHtml(order.id)}/update" class="form-grid">
-        ${orderFormFields(order, leads.rows, products.rows, owners)}
+        ${orderFormFields(order, leads.rows, products.rows, owners, drivers)}
         <div class="actions">
           <button type="submit">Update Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -908,12 +947,12 @@ app.get("/orders/:id/edit", requireAuth, async (req, res) => {
   );
 });
 
-app.post("/orders/:id/update", requireAuth, async (req, res) => {
+app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessOrder(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
-  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes } = req.body;
+  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -938,10 +977,11 @@ app.post("/orders/:id/update", requireAuth, async (req, res) => {
       }
     }
     await client.query(
-      "UPDATE orders SET lead_id = $1, user_id = $2, customer_name = $3, order_value = $4, delivery_status = $5, delivery_address = $6, delivery_date = $7, notes = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9",
+      "UPDATE orders SET lead_id = $1, user_id = $2, driver_id = $3, customer_name = $4, order_value = $5, delivery_status = $6, delivery_address = $7, delivery_date = $8, notes = $9, updated_at = CURRENT_TIMESTAMP WHERE id = $10",
       [
         lead_id || null,
         user_id || null,
+        driver_id || null,
         customer_name,
         finalOrderValue,
         delivery_status || "not_shipped",
@@ -977,19 +1017,20 @@ app.post("/orders/:id/update", requireAuth, async (req, res) => {
 });
 
 app.post("/orders/:id/deliver", requireAuth, async (req, res) => {
-  if (!(await canAccessOrder(req, parseInt(req.params.id, 10)))) {
+  const orderId = parseInt(req.params.id, 10);
+  if (!(await canAccessDelivery(req, orderId))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
   await pool.query(
     "UPDATE orders SET delivery_status = 'delivered', status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-    [req.params.id]
+    [orderId]
   );
   setFlash(req, "Order marked as delivered");
-  res.redirect("/orders");
+  res.redirect(isDriver(req) ? "/deliveries" : "/orders");
 });
 
-app.post("/orders/:id/delete", requireAuth, async (req, res) => {
+app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessOrder(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
@@ -999,11 +1040,78 @@ app.post("/orders/:id/delete", requireAuth, async (req, res) => {
   res.redirect("/orders");
 });
 
+app.get("/deliveries", requireAuth, async (req, res) => {
+  const { status, q } = req.query as { status?: string; q?: string };
+  const driver = isDriver(req);
+  let where = "WHERE o.status != 'cancelled'";
+  const params: (string | number | undefined)[] = [];
+
+  if (driver) {
+    params.push(req.session.user!.id);
+    where += ` AND o.driver_id = $${params.length}`;
+  }
+
+  if (status) {
+    params.push(status);
+    where += ` AND o.delivery_status = $${params.length}`;
+  } else if (!driver) {
+    // Default filter for admin/salesperson: show orders still needing delivery
+    params.push("not_shipped");
+    params.push("shipped");
+    params.push("in_transit");
+    where += ` AND o.delivery_status IN ($${params.length - 2}, $${params.length - 1}, $${params.length})`;
+  }
+
+  if (q) {
+    params.push(`%${q}%`);
+    where += ` AND o.customer_name ILIKE $${params.length}`;
+  }
+
+  const orderF = await orderFilter(req, "o");
+  where += orderF.where;
+  params.push(...orderF.params);
+
+  const result = await pool.query(
+    `SELECT o.*, l.name as lead_name, u.name as owner_name, u.role as owner_role, d.name as driver_name, oi.quantity_sachets, oi.quantity_cartons, oi.quantity_kg
+     FROM orders o
+     LEFT JOIN leads l ON o.lead_id = l.id
+     LEFT JOIN users u ON o.user_id = u.id
+     LEFT JOIN users d ON o.driver_id = d.id
+     LEFT JOIN order_items oi ON o.id = oi.order_id
+     ${where}
+     ORDER BY o.delivery_date ASC NULLS LAST, o.order_date DESC`,
+    params
+  );
+
+  res.send(
+    renderPage(
+      "Deliveries",
+      `
+      <div class="page-title-row">
+        <h1>🚚 ${driver ? "My Deliveries" : "Deliveries"}</h1>
+      </div>
+      <div class="toolbar">
+        <form method="get" class="filters">
+          <input type="search" name="q" value="${escapeHtml(q || "")}" placeholder="Search customer...">
+          <select name="status">
+            <option value="">${driver ? "All my deliveries" : "Pending deliveries"}</option>
+            ${statusOptions(status || "", deliveryStatuses)}
+          </select>
+          <button type="submit">Filter</button>
+        </form>
+      </div>
+      <div class="table-wrap">${deliveriesTable(result.rows, !driver)}</div>`,
+      req
+    )
+  );
+});
+
 function orderFormFields(
   order: OrderWithProduct,
   leads: { id: number; name: string }[],
   products: { id: number; name: string; cost_price: number; selling_price: number; kg_per_sachet: number; sachets_per_carton: number }[] = [],
-  owners: { id: number; name: string; role: string }[] = []
+  owners: { id: number; name: string; role: string }[] = [],
+  drivers: { id: number; name: string }[] = []
 ): string {
   const leadOptions = leads
     .map(
@@ -1038,6 +1146,15 @@ function orderFormFields(
   const ownerSelect = owners.length
     ? `<label>Owner<select name="user_id"><option value="">— none —</option>${ownerOptions}</select></label>`
     : '<p class="empty">No users available.</p>';
+  const driverOptions = drivers
+    .map(
+      (d) =>
+        `<option value="${d.id}" ${d.id === order.driver_id ? "selected" : ""}>${escapeHtml(
+          d.name
+        )}</option>`
+    )
+    .join("");
+  const driverSelect = `<label>Assigned Driver<select name="driver_id"><option value="">— none —</option>${driverOptions}</select></label>`;
   const dateStr = order.order_date
     ? new Date(order.order_date).toISOString().split("T")[0]
     : new Date().toISOString().split("T")[0];
@@ -1051,6 +1168,7 @@ function orderFormFields(
   return `
     <label>Linked Lead<select name="lead_id" id="lead-select"><option value="">— none —</option>${leadOptions}</select></label>
     ${ownerSelect}
+    ${driverSelect}
     ${productSelect}
     <div class="total-price-card full">
       <div class="total-price-label">Total Price</div>
@@ -1129,6 +1247,65 @@ function whatsappOrderText(o: OrderWithLead, date: string): string {
   return lines.filter(Boolean).join("\n");
 }
 
+function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = false): string {
+  if (rows.length === 0) return "<p class=\"empty\">No deliveries found.</p>";
+  return `
+    <table class="data-table">
+      <thead>
+        <tr><th>Customer</th>${showAdminColumns ? "<th>Driver</th>" : ""}<th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map(
+            (o) => {
+              const deliveryDate = o.delivery_date
+                ? new Date(o.delivery_date).toLocaleString(undefined, {
+                    year: "numeric",
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })
+                : "—";
+              const deliveryClass = `status-${escapeHtml(o.delivery_status || "not_shipped")}`;
+              const deliveryLabel = o.delivery_status
+                ? o.delivery_status.charAt(0).toUpperCase() + o.delivery_status.slice(1).replace(/_/g, " ")
+                : "Not shipped";
+              const canDeliver = (o.delivery_status || "not_shipped") !== "delivered";
+              const qtyParts: string[] = [];
+              if (o.quantity_kg && Number(o.quantity_kg) > 0) qtyParts.push(`${Number(o.quantity_kg).toLocaleString(undefined, { maximumFractionDigits: 4 })} kg`);
+              if (o.quantity_cartons && Number(o.quantity_cartons) > 0) qtyParts.push(`${Number(o.quantity_cartons).toLocaleString(undefined, { maximumFractionDigits: 2 })} cartons`);
+              if (o.quantity_sachets && Number(o.quantity_sachets) > 0) qtyParts.push(`${Number(o.quantity_sachets).toLocaleString(undefined, { maximumFractionDigits: 2 })} sachets`);
+              const qtyLine = qtyParts.length > 0 ? qtyParts.join(" / ") : "—";
+              return `
+          <tr>
+            <td>${escapeHtml(o.customer_name)}</td>
+            ${showAdminColumns ? `<td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
+            <td>${escapeHtml(o.delivery_address || "—")}</td>
+            <td>${escapeHtml(deliveryDate)}</td>
+            <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
+            <td>${escapeHtml(qtyLine)}</td>
+            <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
+            <td class="actions">
+              <button type="button" class="button small secondary copy-whatsapp" data-order-text="${escapeHtml(
+                whatsappOrderText(o as OrderWithLead, new Date(o.order_date || Date.now()).toLocaleDateString())
+              )}">Copy</button>
+              ${
+                canDeliver
+                  ? `<form method="post" action="/orders/${o.id}/deliver" class="inline">
+                       <button type="submit" class="button small success">Mark Delivered</button>
+                     </form>`
+                  : `<span class="badge">Delivered</span>`
+              }
+            </td>
+          </tr>`;
+            }
+          )
+          .join("")}
+      </tbody>
+    </table>`;
+}
+
 function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
   if (rows.length === 0) return "<p class=\"empty\">No orders found.</p>";
   return `
@@ -1191,7 +1368,7 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
     </table>`;
 }
 
-app.get("/users", requireAuth, requireAdmin, async (req, res) => {
+app.get("/users", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const result = await pool.query(
     "SELECT id, name, email, role, is_active, created_at FROM users ORDER BY name"
   );
@@ -1209,7 +1386,7 @@ app.get("/users", requireAuth, requireAdmin, async (req, res) => {
   );
 });
 
-app.get("/users/new", requireAuth, requireAdmin, (req, res) => {
+app.get("/users/new", requireAuth, blockDriver, requireAdmin, (req, res) => {
   res.send(
     renderPage(
       "New User",
@@ -1227,7 +1404,7 @@ app.get("/users/new", requireAuth, requireAdmin, (req, res) => {
   );
 });
 
-app.post("/users", requireAuth, requireAdmin, async (req, res) => {
+app.post("/users", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const { name, email, password, role, is_active } = req.body;
   const hash = await hashPassword(password);
   await pool.query(
@@ -1238,7 +1415,7 @@ app.post("/users", requireAuth, requireAdmin, async (req, res) => {
   res.redirect("/users");
 });
 
-app.get("/users/:id/edit", requireAuth, requireAdmin, async (req, res) => {
+app.get("/users/:id/edit", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const result = await pool.query("SELECT id, name, email, role, is_active FROM users WHERE id = $1", [
     req.params.id,
   ]);
@@ -1264,7 +1441,7 @@ app.get("/users/:id/edit", requireAuth, requireAdmin, async (req, res) => {
   );
 });
 
-app.post("/users/:id/update", requireAuth, requireAdmin, async (req, res) => {
+app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const { name, email, password, role, is_active } = req.body;
   const updates: (string | number | boolean | null)[] = [];
   const fields: string[] = [];
@@ -1298,7 +1475,7 @@ app.post("/users/:id/update", requireAuth, requireAdmin, async (req, res) => {
   res.redirect("/users");
 });
 
-app.post("/users/:id/send-reset", requireAuth, requireAdmin, async (req, res) => {
+app.post("/users/:id/send-reset", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const userResult = await pool.query("SELECT id, email, name FROM users WHERE id = $1", [req.params.id]);
   const user = userResult.rows[0];
   if (!user) {
@@ -1318,7 +1495,7 @@ app.post("/users/:id/send-reset", requireAuth, requireAdmin, async (req, res) =>
   res.redirect("/users");
 });
 
-app.post("/users/:id/delete", requireAuth, requireAdmin, async (req, res) => {
+app.post("/users/:id/delete", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   if (Number(req.params.id) === req.session.user!.id) {
     setFlash(req, "You cannot delete your own account", "error");
     res.redirect("/users");
@@ -1330,7 +1507,7 @@ app.post("/users/:id/delete", requireAuth, requireAdmin, async (req, res) => {
 });
 
 function userFormFields(user: Partial<User>): string {
-  const roles = ["admin", "salesperson"];
+  const roles = ["admin", "salesperson", "driver"];
   return `
     <label>Name * <input type="text" name="name" value="${escapeHtml(user.name)}" required></label>
     <label>Email * <input type="email" name="email" value="${escapeHtml(user.email)}" required></label>
@@ -1374,7 +1551,7 @@ function usersTable(rows: Partial<User>[]): string {
     </table>`;
 }
 
-app.get("/products", requireAuth, async (req, res) => {
+app.get("/products", requireAuth, blockDriver, async (req, res) => {
   const { q } = req.query as { q?: string };
   const admin = isAdmin(req);
   let where = "WHERE 1=1";
@@ -1395,7 +1572,7 @@ app.get("/products", requireAuth, async (req, res) => {
       `
       <div class="page-title-row">
         <h1>Products</h1>
-        ${admin ? '<a href="/products/new" class="button">+ New Product</a>' : ""}
+        <a href="/products/new" class="button">+ New Product</a>
       </div>
       <div class="toolbar">
         <form method="get" class="filters">
@@ -1403,13 +1580,13 @@ app.get("/products", requireAuth, async (req, res) => {
           <button type="submit">Filter</button>
         </form>
       </div>
-      <div class="table-wrap">${productsTable(result.rows, admin)}</div>`,
+      <div class="table-wrap">${productsTable(result.rows, true)}</div>`,
       req
     )
   );
 });
 
-app.get("/products/new", requireAuth, requireAdmin, (req, res) => {
+app.get("/products/new", requireAuth, blockDriver, (req, res) => {
   res.send(
     renderPage(
       "New Product",
@@ -1427,7 +1604,7 @@ app.get("/products/new", requireAuth, requireAdmin, (req, res) => {
   );
 });
 
-app.post("/products", requireAuth, requireAdmin, async (req, res) => {
+app.post("/products", requireAuth, blockDriver, async (req, res) => {
   const { name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton } = req.body;
   await pool.query(
     "INSERT INTO products (name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -1437,7 +1614,7 @@ app.post("/products", requireAuth, requireAdmin, async (req, res) => {
   res.redirect("/products");
 });
 
-app.get("/products/:id/edit", requireAuth, requireAdmin, async (req, res) => {
+app.get("/products/:id/edit", requireAuth, blockDriver, async (req, res) => {
   const result = await pool.query("SELECT * FROM products WHERE id = $1", [req.params.id]);
   const product = result.rows[0] as Product | undefined;
   if (!product) {
@@ -1461,7 +1638,7 @@ app.get("/products/:id/edit", requireAuth, requireAdmin, async (req, res) => {
   );
 });
 
-app.post("/products/:id/update", requireAuth, requireAdmin, async (req, res) => {
+app.post("/products/:id/update", requireAuth, blockDriver, async (req, res) => {
   const { name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton } = req.body;
   await pool.query(
     "UPDATE products SET name = $1, sku = $2, description = $3, cost_price = $4, selling_price = $5, stock_kg = $6, kg_per_sachet = $7, sachets_per_carton = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9",
@@ -1471,7 +1648,7 @@ app.post("/products/:id/update", requireAuth, requireAdmin, async (req, res) => 
   res.redirect("/products");
 });
 
-app.post("/products/:id/delete", requireAuth, requireAdmin, async (req, res) => {
+app.post("/products/:id/delete", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   try {
     await pool.query("DELETE FROM products WHERE id = $1", [req.params.id]);
     setFlash(req, "Product deleted");
@@ -1560,7 +1737,7 @@ function productsTable(rows: Partial<Product>[], actions = false): string {
     </table>`;
 }
 
-app.get("/reports", requireAuth, async (req, res) => {
+app.get("/reports", requireAuth, blockDriver, async (req, res) => {
   const leadF = await leadFilter(req);
   const orderF = await orderFilter(req);
   const funnel = await pool.query(
@@ -1626,7 +1803,7 @@ app.get("/reports", requireAuth, async (req, res) => {
   );
 });
 
-app.get("/reports/kg-sales", requireAuth, async (req, res) => {
+app.get("/reports/kg-sales", requireAuth, blockDriver, async (req, res) => {
   const { range, groupBy, status } = req.query as { range?: string; groupBy?: string; status?: string };
   const selectedRange = range || "last_30_days";
   const selectedGroup = groupBy || "day";
@@ -1804,7 +1981,7 @@ function csvRow(cells: (string | number | null)[]): string {
     .join(",");
 }
 
-app.get("/export/leads", requireAuth, async (req, res) => {
+app.get("/export/leads", requireAuth, blockDriver, async (req, res) => {
   const leadF = await leadFilter(req);
   const result = await pool.query(
     `SELECT id, name, company, email, phone, status, value, notes, created_at, updated_at FROM leads WHERE 1=1${leadF.where} ORDER BY id`,
@@ -1832,7 +2009,7 @@ app.get("/export/leads", requireAuth, async (req, res) => {
   res.send(lines.join("\n"));
 });
 
-app.get("/export/orders", requireAuth, async (req, res) => {
+app.get("/export/orders", requireAuth, blockDriver, async (req, res) => {
   const orderF = await orderFilter(req, "o");
   const result = await pool.query(
     `SELECT o.id, o.customer_name, l.name as lead_name, o.status, o.order_date, o.delivery_status, o.delivery_address, o.shipped_date, o.order_value, o.notes, o.created_at, o.updated_at FROM orders o LEFT JOIN leads l ON o.lead_id = l.id WHERE 1=1${orderF.where} ORDER BY o.id`,

@@ -1,4 +1,4 @@
-export function page(title: string, body: string, userName?: string, isAdmin: boolean = false): string {
+export function page(title: string, body: string, userName?: string, isAdmin: boolean = false, isDriver: boolean = false): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8,7 +8,7 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  ${userName ? sideMenu(userName, isAdmin) : ""}
+  ${userName ? sideMenu(userName, isAdmin, isDriver) : ""}
   <div class="app-shell ${userName ? "with-sidebar" : ""}">
     ${userName ? "" : `<header class="site-header"><div class="container"><a href="/" class="logo">Leads & Orders</a></div></header>`}
     <main class="main-content">
@@ -20,14 +20,17 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
 </html>`;
 }
 
-function sideMenu(userName: string, isAdmin: boolean): string {
-  const baseItems = [
-    { href: "/dashboard", icon: "⊞", label: "Dashboard" },
-    { href: "/leads", icon: "👤", label: "Leads" },
-    { href: "/orders", icon: "📦", label: "Orders" },
-    { href: "/products", icon: "🛍", label: "Products" },
-    ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
-  ];
+function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean): string {
+  const baseItems = isDriver
+    ? [{ href: "/deliveries", icon: "🚚", label: "Deliveries" }]
+    : [
+        { href: "/dashboard", icon: "⊞", label: "Dashboard" },
+        { href: "/leads", icon: "👤", label: "Leads" },
+        { href: "/orders", icon: "📦", label: "Orders" },
+        { href: "/deliveries", icon: "🚚", label: "Deliveries" },
+        { href: "/products", icon: "🛍", label: "Products" },
+        ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
+      ];
 
   const renderItem = (i: { href: string; icon: string; label: string }) => `
     <a href="${i.href}" class="sidebar-link" data-match="${i.href}">

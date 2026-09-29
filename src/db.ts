@@ -188,10 +188,30 @@ export async function initDb(): Promise<void> {
     `);
 
     await client.query(`
+      ALTER TABLE orders
+      ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_driver_id ON orders(driver_id);
+    `);
+
+    await client.query(`
       DO $$
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_user_role' AND conrelid = 'users'::regclass) THEN
-          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson'));
+          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver'));
+        END IF;
+      END $$;
+    `);
+
+    // Widen existing role constraint if it only allows admin/salesperson
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_user_role' AND conrelid = 'users'::regclass) THEN
+          ALTER TABLE users DROP CONSTRAINT valid_user_role;
+          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver'));
         END IF;
       END $$;
     `);
@@ -288,6 +308,7 @@ export interface Order {
   id: number;
   lead_id: number | null;
   user_id: number | null;
+  driver_id: number | null;
   customer_name: string;
   order_value: number;
   status: string;

@@ -349,6 +349,7 @@ app.get("/dashboard", requireAuth, blockDriver, async (req, res) => {
 const leadStatuses = ["new", "contacted", "qualified", "converted", "lost"];
 const orderStatuses = ["order_placed", "pending", "confirmed", "shipped", "completed", "cancelled"];
 const deliveryStatuses = ["not_shipped", "shipped", "in_transit", "delivered", "returned"];
+const regions = ["north", "south", "east", "west", "center"];
 
 function localIso(d: Date): string {
   const y = d.getFullYear();
@@ -410,7 +411,7 @@ function formatPeriodLabel(groupBy: string, period: string): string {
 }
 
 type OrderWithProduct = Partial<Order> & { product_id?: number };
-type OrderWithLead = Order & { lead_name?: string; owner_name?: string; owner_role?: string; driver_name?: string; product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; delivery_date_formatted?: string };
+type OrderWithLead = Order & { lead_name?: string; lead_region?: string; owner_name?: string; owner_role?: string; driver_name?: string; product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; delivery_date_formatted?: string };
 
 app.get("/leads", requireAuth, blockDriver, async (req, res) => {
   const { status, q } = req.query as { status?: string; q?: string };
@@ -427,7 +428,7 @@ app.get("/leads", requireAuth, blockDriver, async (req, res) => {
   }
 
   const result = await pool.query(
-    `SELECT id, name, company, email, phone, status, value FROM leads ${where}${leadF.where} ORDER BY updated_at DESC`,
+    `SELECT id, name, company, email, phone, status, region, value FROM leads ${where}${leadF.where} ORDER BY updated_at DESC`,
     params
   );
 
@@ -475,10 +476,10 @@ app.get("/leads/new", requireAuth, blockDriver, (req, res) => {
 });
 
 app.post("/leads", requireAuth, blockDriver, async (req, res) => {
-  const { name, company, email, phone, status, value, delivery_location, notes } = req.body;
+  const { name, company, email, phone, status, region, value, delivery_location, notes } = req.body;
   await pool.query(
-    "INSERT INTO leads (name, company, email, phone, status, value, delivery_location, notes, assigned_to) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-    [name, company || null, email || null, phone || null, status || "new", parseFloat(value) || 0, delivery_location || null, notes || null, req.session.user!.id]
+    "INSERT INTO leads (name, company, email, phone, status, region, value, delivery_location, notes, assigned_to) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    [name, company || null, email || null, phone || null, status || "new", region || null, parseFloat(value) || 0, delivery_location || null, notes || null, req.session.user!.id]
   );
   setFlash(req, "Lead created");
   res.redirect("/leads");
@@ -517,10 +518,10 @@ app.post("/leads/:id/update", requireAuth, blockDriver, async (req, res) => {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
-  const { name, company, email, phone, status, value, delivery_location, notes } = req.body;
+  const { name, company, email, phone, status, region, value, delivery_location, notes } = req.body;
   await pool.query(
-    "UPDATE leads SET name = $1, company = $2, email = $3, phone = $4, status = $5, value = $6, delivery_location = $7, notes = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9",
-    [name, company || null, email || null, phone || null, status || "new", parseFloat(value) || 0, delivery_location || null, notes || null, req.params.id]
+    "UPDATE leads SET name = $1, company = $2, email = $3, phone = $4, status = $5, region = $6, value = $7, delivery_location = $8, notes = $9, updated_at = CURRENT_TIMESTAMP WHERE id = $10",
+    [name, company || null, email || null, phone || null, status || "new", region || null, parseFloat(value) || 0, delivery_location || null, notes || null, req.params.id]
   );
   setFlash(req, "Lead updated");
   res.redirect("/leads");
@@ -664,6 +665,7 @@ function leadFormFields(lead: Partial<Lead>): string {
     <label>Email<input type="email" name="email" value="${escapeHtml(lead.email)}"></label>
     <label>Phone<input type="text" name="phone" value="${escapeHtml(lead.phone)}"></label>
     <label>Status<select name="status">${statusOptions(lead.status || "", leadStatuses)}</select></label>
+    <label>Region<select name="region"><option value="">— Select region —</option>${statusOptions(lead.region || "", regions)}</select></label>
     <label>Estimated Value<input type="number" step="0.01" name="value" value="${escapeHtml(
       lead.value ?? ""
     )}"></label>
@@ -677,7 +679,7 @@ function leadsTable(rows: Partial<Lead>[], actions = false): string {
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Name</th><th>Company</th><th>Email</th><th>Status</th><th>Value</th>${
+        <tr><th>Name</th><th>Company</th><th>Email</th><th>Status</th><th>Region</th><th>Value</th>${
           actions ? "<th>Actions</th>" : ""
         }</tr>
       </thead>
@@ -692,6 +694,7 @@ function leadsTable(rows: Partial<Lead>[], actions = false): string {
             <td><span class="status status-${escapeHtml(l.status)}">${escapeHtml(
               l.status?.charAt(0).toUpperCase() + (l.status?.slice(1) || "")
             )}</span></td>
+            <td>${escapeHtml(l.region ? l.region.charAt(0).toUpperCase() + l.region.slice(1) : "—")}</td>
             <td>Rs ${escapeHtml(Number(l.value || 0).toLocaleString())}</td>
             ${
               actions
@@ -1041,7 +1044,7 @@ app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
 });
 
 app.get("/deliveries", requireAuth, async (req, res) => {
-  const { status, q } = req.query as { status?: string; q?: string };
+  const { status, region, q } = req.query as { status?: string; region?: string; q?: string };
   const driver = isDriver(req);
   let where = "WHERE o.status != 'cancelled'";
   const params: (string | number | undefined)[] = [];
@@ -1062,6 +1065,11 @@ app.get("/deliveries", requireAuth, async (req, res) => {
     where += ` AND o.delivery_status IN ($${params.length - 2}, $${params.length - 1}, $${params.length})`;
   }
 
+  if (region) {
+    params.push(region);
+    where += ` AND l.region = $${params.length}`;
+  }
+
   if (q) {
     params.push(`%${q}%`);
     where += ` AND o.customer_name ILIKE $${params.length}`;
@@ -1072,7 +1080,7 @@ app.get("/deliveries", requireAuth, async (req, res) => {
   params.push(...orderF.params);
 
   const result = await pool.query(
-    `SELECT o.*, l.name as lead_name, u.name as owner_name, u.role as owner_role, d.name as driver_name, oi.quantity_sachets, oi.quantity_cartons, oi.quantity_kg
+    `SELECT o.id, o.lead_id, o.customer_name, o.order_value, o.status, o.order_date, o.delivery_status, o.delivery_address, o.delivery_date, o.shipped_date, o.notes, o.created_at, o.updated_at, l.name as lead_name, l.region as lead_region, u.name as owner_name, u.role as owner_role, d.name as driver_name, oi.quantity_sachets, oi.quantity_cartons, oi.quantity_kg
      FROM orders o
      LEFT JOIN leads l ON o.lead_id = l.id
      LEFT JOIN users u ON o.user_id = u.id
@@ -1096,6 +1104,10 @@ app.get("/deliveries", requireAuth, async (req, res) => {
           <select name="status">
             <option value="">${driver ? "All my deliveries" : "Pending deliveries"}</option>
             ${statusOptions(status || "", deliveryStatuses)}
+          </select>
+          <select name="region">
+            <option value="">All regions</option>
+            ${statusOptions(region || "", regions)}
           </select>
           <button type="submit">Filter</button>
         </form>
@@ -1252,7 +1264,7 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Customer</th>${showAdminColumns ? "<th>Driver</th>" : ""}<th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
+        <tr><th>Order ID</th><th>Lead ID</th><th>Customer</th>${showAdminColumns ? "<th>Driver</th>" : ""}<th>Region</th><th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
       </thead>
       <tbody>
         ${rows
@@ -1287,10 +1299,16 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
               if (o.quantity_cartons && Number(o.quantity_cartons) > 0) qtyParts.push(`${Number(o.quantity_cartons).toLocaleString(undefined, { maximumFractionDigits: 2 })} cartons`);
               if (o.quantity_sachets && Number(o.quantity_sachets) > 0) qtyParts.push(`${Number(o.quantity_sachets).toLocaleString(undefined, { maximumFractionDigits: 2 })} sachets`);
               const qtyLine = qtyParts.length > 0 ? qtyParts.join(" / ") : "—";
+              const regionLabel = o.lead_region
+                ? o.lead_region.charAt(0).toUpperCase() + o.lead_region.slice(1)
+                : "—";
               return `
           <tr>
+            <td>${escapeHtml(o.id)}</td>
+            <td>${escapeHtml(o.lead_id || "—")}</td>
             <td>${escapeHtml(o.customer_name)}</td>
             ${showAdminColumns ? `<td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
+            <td>${escapeHtml(regionLabel)}</td>
             <td>${addressCell}</td>
             <td>${escapeHtml(deliveryDate)}</td>
             <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>

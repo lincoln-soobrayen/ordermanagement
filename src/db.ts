@@ -85,6 +85,24 @@ export async function initDb(): Promise<void> {
     `);
 
     await client.query(`
+      ALTER TABLE leads
+      ADD COLUMN IF NOT EXISTS region VARCHAR(50)
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_lead_region' AND conrelid = 'leads'::regclass) THEN
+          ALTER TABLE leads ADD CONSTRAINT valid_lead_region CHECK (region IS NULL OR region IN ('north', 'south', 'east', 'west', 'center'));
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_leads_region ON leads(region);
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS lead_comments (
         id SERIAL PRIMARY KEY,
         lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
@@ -297,6 +315,7 @@ export interface Lead {
   phone: string | null;
   status: string;
   value: number;
+  region: string | null;
   delivery_location: string | null;
   notes: string | null;
   assigned_to: number | null;

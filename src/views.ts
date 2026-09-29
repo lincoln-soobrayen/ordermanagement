@@ -49,6 +49,8 @@ function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean): string
       <div class="sidebar-submenu">
         ${renderItem({ href: "/reports", icon: "📊", label: "Overview" })}
         ${renderItem({ href: "/reports/kg-sales", icon: "📈", label: "KG Sales" })}
+        ${renderItem({ href: "/reports/monthly-margin", icon: "💰", label: "Monthly Margin" })}
+        ${renderItem({ href: "/reports/client-margin", icon: "📉", label: "Client Margin" })}
       </div>
     </div>
   `;

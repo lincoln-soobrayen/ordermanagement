@@ -387,6 +387,10 @@ function getDateRange(preset: string): DateRange {
       const year = today.getFullYear() - 1;
       return { from: `${year}-01-01`, to: `${year}-12-31`, label: "Last year" };
     }
+    case "last_12_months": {
+      const start = new Date(today.getFullYear(), today.getMonth() - 11, 1);
+      return { from: localIso(start), to: localIso(today), label: "Last 12 months" };
+    }
     case "all_time":
       return { from: "", to: "", label: "All time" };
     default:
@@ -1984,6 +1988,247 @@ app.get("/reports/kg-sales", requireAuth, blockDriver, async (req, res) => {
           labels: ${JSON.stringify(labels)},
           data: ${JSON.stringify(data)},
           groupBy: ${JSON.stringify(selectedGroup)},
+        };
+      </script>`,
+      req
+    )
+  );
+});
+
+function money(n: number): string {
+  return `Rs ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) => {
+  const { range } = req.query as { range?: string };
+  const selectedRange = range || "last_12_months";
+  const dateRange = getDateRange(selectedRange);
+  const orderF = await orderFilter(req, "o");
+
+  let where = "WHERE 1=1";
+  const params: (string | number | undefined)[] = [...orderF.params];
+  where += orderF.where;
+  if (dateRange.from) {
+    params.push(dateRange.from);
+    where += ` AND o.order_date >= $${params.length}`;
+  }
+  if (dateRange.to) {
+    params.push(dateRange.to);
+    where += ` AND o.order_date <= $${params.length}`;
+  }
+
+  const result = await pool.query(
+    `SELECT TO_CHAR(o.order_date, 'YYYY-MM') as month,
+            COUNT(DISTINCT o.id) as orders,
+            COALESCE(SUM(oi.unit_price * oi.quantity_kg), 0)::numeric as revenue,
+            COALESCE(SUM(p.cost_price * oi.quantity_kg), 0)::numeric as cost,
+            COALESCE(SUM((oi.unit_price - p.cost_price) * oi.quantity_kg), 0)::numeric as margin
+     FROM orders o
+     JOIN order_items oi ON o.id = oi.order_id
+     JOIN products p ON oi.product_id = p.id
+     ${where}
+     GROUP BY TO_CHAR(o.order_date, 'YYYY-MM')
+     ORDER BY month DESC`,
+    params
+  );
+
+  const totalRevenue = result.rows.reduce((sum, r) => sum + Number(r.revenue), 0);
+  const totalCost = result.rows.reduce((sum, r) => sum + Number(r.cost), 0);
+  const totalMargin = result.rows.reduce((sum, r) => sum + Number(r.margin), 0);
+
+  const tableRows = result.rows
+    .map(
+      (r) =>
+        `<tr>
+          <td>${escapeHtml(formatPeriodLabel("month", r.month))}</td>
+          <td>${escapeHtml(r.orders)}</td>
+          <td>${escapeHtml(money(r.revenue))}</td>
+          <td>${escapeHtml(money(r.cost))}</td>
+          <td>${escapeHtml(money(r.margin))}</td>
+        </tr>`
+    )
+    .join("");
+
+  const rangeOptions = [
+    { value: "last_7_days", label: "Last 7 days" },
+    { value: "last_30_days", label: "Last 30 days" },
+    { value: "this_month", label: "This month" },
+    { value: "last_month", label: "Last month" },
+    { value: "this_year", label: "This year" },
+    { value: "last_year", label: "Last year" },
+    { value: "last_12_months", label: "Last 12 months" },
+    { value: "all_time", label: "All time" },
+  ];
+
+  const selectOptionsHtml = (
+    options: { value: string; label: string }[],
+    selected: string
+  ): string =>
+    options
+      .map(
+        (o) =>
+          `<option value="${escapeHtml(o.value)}" ${o.value === selected ? "selected" : ""}>${escapeHtml(
+            o.label
+          )}</option>`
+      )
+      .join("");
+
+  res.send(
+    renderPage(
+      "Monthly Margin Report",
+      `
+      <h1>Monthly Margin Report</h1>
+      <section class="stats">
+        <div class="card highlight"><strong>${escapeHtml(money(totalRevenue))}</strong><span>Total Revenue</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalCost))}</strong><span>Total Cost</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalMargin))}</strong><span>Total Margin</span></div>
+      </section>
+      <section>
+        <div class="toolbar">
+          <form method="get" class="filters">
+            <label>Range
+              <select name="range">${selectOptionsHtml(rangeOptions, selectedRange)}</select>
+            </label>
+            <button type="submit">Update</button>
+          </form>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Month</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
+            <tbody>${tableRows || '<tr><td colspan="5" class="empty">No data for selected range</td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>`,
+      req
+    )
+  );
+});
+
+app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => {
+  const { range, limit } = req.query as { range?: string; limit?: string };
+  const selectedRange = range || "last_12_months";
+  const selectedLimit = Math.min(parseInt(limit || "20", 10) || 20, 50);
+  const dateRange = getDateRange(selectedRange);
+  const orderF = await orderFilter(req, "o");
+
+  let where = "WHERE 1=1";
+  const params: (string | number | undefined)[] = [...orderF.params];
+  where += orderF.where;
+  if (dateRange.from) {
+    params.push(dateRange.from);
+    where += ` AND o.order_date >= $${params.length}`;
+  }
+  if (dateRange.to) {
+    params.push(dateRange.to);
+    where += ` AND o.order_date <= $${params.length}`;
+  }
+
+  const result = await pool.query(
+    `SELECT o.customer_name,
+            COUNT(DISTINCT o.id) as orders,
+            COALESCE(SUM(oi.unit_price * oi.quantity_kg), 0)::numeric as revenue,
+            COALESCE(SUM(p.cost_price * oi.quantity_kg), 0)::numeric as cost,
+            COALESCE(SUM((oi.unit_price - p.cost_price) * oi.quantity_kg), 0)::numeric as margin
+     FROM orders o
+     JOIN order_items oi ON o.id = oi.order_id
+     JOIN products p ON oi.product_id = p.id
+     ${where}
+     GROUP BY o.customer_name
+     ORDER BY margin DESC
+     LIMIT $${params.length + 1}`,
+    [...params, selectedLimit]
+  );
+
+  const labels = result.rows.map((r) => r.customer_name);
+  const revenueData = result.rows.map((r) => Number(r.revenue));
+  const marginData = result.rows.map((r) => Number(r.margin));
+
+  const totalRevenue = revenueData.reduce((a, b) => a + b, 0);
+  const totalCost = result.rows.reduce((sum, r) => sum + Number(r.cost), 0);
+  const totalMargin = marginData.reduce((a, b) => a + b, 0);
+
+  const tableRows = result.rows
+    .map(
+      (r) =>
+        `<tr>
+          <td>${escapeHtml(r.customer_name)}</td>
+          <td>${escapeHtml(r.orders)}</td>
+          <td>${escapeHtml(money(r.revenue))}</td>
+          <td>${escapeHtml(money(r.cost))}</td>
+          <td>${escapeHtml(money(r.margin))}</td>
+        </tr>`
+    )
+    .join("");
+
+  const rangeOptions = [
+    { value: "last_7_days", label: "Last 7 days" },
+    { value: "last_30_days", label: "Last 30 days" },
+    { value: "this_month", label: "This month" },
+    { value: "last_month", label: "Last month" },
+    { value: "this_year", label: "This year" },
+    { value: "last_year", label: "Last year" },
+    { value: "last_12_months", label: "Last 12 months" },
+    { value: "all_time", label: "All time" },
+  ];
+
+  const selectOptionsHtml = (
+    options: { value: string; label: string }[],
+    selected: string
+  ): string =>
+    options
+      .map(
+        (o) =>
+          `<option value="${escapeHtml(o.value)}" ${o.value === selected ? "selected" : ""}>${escapeHtml(
+            o.label
+          )}</option>`
+      )
+      .join("");
+
+  res.send(
+    renderPage(
+      "Client Margin Report",
+      `
+      <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+      <h1>Client Margin Report</h1>
+      <section class="stats">
+        <div class="card highlight"><strong>${escapeHtml(money(totalRevenue))}</strong><span>Total Revenue</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalCost))}</strong><span>Total Cost</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalMargin))}</strong><span>Total Margin</span></div>
+      </section>
+      <section>
+        <div class="toolbar">
+          <form method="get" class="filters">
+            <label>Range
+              <select name="range">${selectOptionsHtml(rangeOptions, selectedRange)}</select>
+            </label>
+            <label>Top
+              <select name="limit">
+                <option value="10" ${selectedLimit === 10 ? "selected" : ""}>10 clients</option>
+                <option value="20" ${selectedLimit === 20 ? "selected" : ""}>20 clients</option>
+                <option value="50" ${selectedLimit === 50 ? "selected" : ""}>50 clients</option>
+              </select>
+            </label>
+            <button type="submit">Update</button>
+          </form>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="client-margin-chart" height="120"></canvas>
+        </div>
+      </section>
+      <section>
+        <h2>Client Data</h2>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Client</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
+            <tbody>${tableRows || '<tr><td colspan="5" class="empty">No data for selected range</td></tr>'}</tbody>
+          </table>
+        </div>
+      </section>
+      <script>
+        window.clientMarginData = {
+          labels: ${JSON.stringify(labels)},
+          revenue: ${JSON.stringify(revenueData)},
+          margin: ${JSON.stringify(marginData)},
         };
       </script>`,
       req

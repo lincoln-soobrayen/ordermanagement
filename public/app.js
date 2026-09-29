@@ -333,4 +333,60 @@ document.addEventListener("DOMContentLoaded", () => {
       });
     }
   }
+
+  // Client revenue vs margin bar chart
+  const clientMarginCanvas = document.getElementById("client-margin-chart");
+  if (clientMarginCanvas && window.clientMarginData && window.clientMarginData.labels.length > 0) {
+    const { labels, revenue, margin } = window.clientMarginData;
+    const ctx = clientMarginCanvas.getContext("2d");
+    if (ctx && typeof Chart !== "undefined") {
+      // eslint-disable-next-line no-undef
+      new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Revenue",
+              data: revenue,
+              backgroundColor: "rgba(79, 70, 229, 0.7)",
+              borderColor: "rgba(79, 70, 229, 1)",
+              borderWidth: 1,
+              borderRadius: 6,
+            },
+            {
+              label: "Margin",
+              data: margin,
+              backgroundColor: "rgba(16, 185, 129, 0.7)",
+              borderColor: "rgba(16, 185, 129, 1)",
+              borderWidth: 1,
+              borderRadius: 6,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: true, position: "top" },
+            tooltip: {
+              callbacks: {
+                label: (context) =>
+                  `${context.dataset.label}: Rs ${Number(context.parsed.y).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              },
+            },
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              title: { display: true, text: "Amount (Rs)" },
+            },
+            x: {
+              title: { display: true, text: "Client" },
+            },
+          },
+        },
+      });
+    }
+  }
 });

@@ -1272,6 +1272,11 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
                 ? o.delivery_status.charAt(0).toUpperCase() + o.delivery_status.slice(1).replace(/_/g, " ")
                 : "Not shipped";
               const canDeliver = (o.delivery_status || "not_shipped") !== "delivered";
+              const address = o.delivery_address || "—";
+              const addressCell =
+                address.startsWith("http://") || address.startsWith("https://")
+                  ? `<a href="${escapeHtml(address)}" target="_blank" rel="noopener noreferrer">${escapeHtml(address)}</a>`
+                  : escapeHtml(address);
               const qtyParts: string[] = [];
               if (o.quantity_kg && Number(o.quantity_kg) > 0) qtyParts.push(`${Number(o.quantity_kg).toLocaleString(undefined, { maximumFractionDigits: 4 })} kg`);
               if (o.quantity_cartons && Number(o.quantity_cartons) > 0) qtyParts.push(`${Number(o.quantity_cartons).toLocaleString(undefined, { maximumFractionDigits: 2 })} cartons`);
@@ -1281,7 +1286,7 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
           <tr>
             <td>${escapeHtml(o.customer_name)}</td>
             ${showAdminColumns ? `<td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
-            <td>${escapeHtml(o.delivery_address || "—")}</td>
+            <td>${addressCell}</td>
             <td>${escapeHtml(deliveryDate)}</td>
             <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
             <td>${escapeHtml(qtyLine)}</td>

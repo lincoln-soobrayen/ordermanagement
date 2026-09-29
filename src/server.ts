@@ -768,7 +768,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
   const leadF = await leadFilter(req);
   const orderF = await orderFilter(req);
   let leads = await pool.query(
-    `SELECT id, name FROM leads WHERE 1=1${leadF.where} ORDER BY name`,
+    `SELECT id, name, company FROM leads WHERE 1=1${leadF.where} ORDER BY company, name`,
     leadF.params
   );
   let products = await pool.query("SELECT id, name, cost_price, selling_price, kg_per_sachet, sachets_per_carton FROM products ORDER BY name");
@@ -1117,17 +1117,17 @@ app.get("/deliveries", requireAuth, async (req, res) => {
 
 function orderFormFields(
   order: OrderWithProduct,
-  leads: { id: number; name: string }[],
+  leads: { id: number; name: string; company?: string }[],
   products: { id: number; name: string; cost_price: number; selling_price: number; kg_per_sachet: number; sachets_per_carton: number }[] = [],
   owners: { id: number; name: string; role: string }[] = [],
   drivers: { id: number; name: string }[] = []
 ): string {
   const leadOptions = leads
     .map(
-      (l) =>
-        `<option value="${l.id}" data-url="/orders/new?lead_id=${l.id}" ${l.id === order.lead_id ? "selected" : ""}>${escapeHtml(
-          l.name
-        )}</option>`
+      (l) => {
+        const label = l.company ? `${l.company} (${l.name})` : l.name;
+        return `<option value="${l.id}" data-url="/orders/new?lead_id=${l.id}" ${l.id === order.lead_id ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }
     )
     .join("");
   const productOptions = products

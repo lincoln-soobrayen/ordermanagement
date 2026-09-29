@@ -835,6 +835,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
 
 app.post("/orders", requireAuth, blockDriver, async (req, res) => {
   const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
+  const isSample = Boolean(req.body.is_sample);
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -848,6 +849,7 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
   try {
     await client.query("BEGIN");
     let finalOrderValue = 0;
+    let unitPrice = 0;
     if (product_id) {
       const productResult = await client.query(
         "SELECT selling_price FROM products WHERE id = $1",
@@ -855,7 +857,8 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
       );
       const product = productResult.rows[0];
       if (product) {
-        finalOrderValue = (parseFloat(quantity_kg) || 0) * (product.selling_price || 0);
+        unitPrice = isSample ? 0 : (product.selling_price || 0);
+        finalOrderValue = (parseFloat(quantity_kg) || 0) * unitPrice;
       }
     }
     const orderResult = await client.query(
@@ -875,17 +878,10 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
       ]
     );
     if (product_id) {
-      const productResult = await client.query(
-        "SELECT selling_price FROM products WHERE id = $1",
-        [product_id]
+      await client.query(
+        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
+        [orderResult.rows[0].id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, unitPrice]
       );
-      const product = productResult.rows[0];
-      if (product) {
-        await client.query(
-          "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
-          [orderResult.rows[0].id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, product.selling_price || 0]
-        );
-      }
     }
     await client.query("COMMIT");
     setFlash(req, "Order created");
@@ -927,7 +923,7 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
   }
   const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
   const orderItemResult = await pool.query(
-    "SELECT product_id, quantity_kg, quantity_sachets, quantity_cartons FROM order_items WHERE order_id = $1 LIMIT 1",
+    "SELECT product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price FROM order_items WHERE order_id = $1 LIMIT 1",
     [req.params.id]
   );
   const orderItem = orderItemResult.rows[0];
@@ -936,6 +932,7 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
     (order as any).quantity_kg = orderItem.quantity_kg;
     (order as any).quantity_sachets = orderItem.quantity_sachets;
     (order as any).quantity_cartons = orderItem.quantity_cartons;
+    (order as any).is_sample = (orderItem.unit_price || 0) === 0;
   }
   res.send(
     renderPage(
@@ -960,6 +957,7 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     return;
   }
   const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
+  const isSample = Boolean(req.body.is_sample);
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -973,6 +971,7 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
   try {
     await client.query("BEGIN");
     let finalOrderValue = 0;
+    let unitPrice = 0;
     if (product_id) {
       const productResult = await client.query(
         "SELECT selling_price FROM products WHERE id = $1",
@@ -980,7 +979,8 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
       );
       const product = productResult.rows[0];
       if (product) {
-        finalOrderValue = (parseFloat(quantity_kg) || 0) * (product.selling_price || 0);
+        unitPrice = isSample ? 0 : (product.selling_price || 0);
+        finalOrderValue = (parseFloat(quantity_kg) || 0) * unitPrice;
       }
     }
     await client.query(
@@ -1000,17 +1000,10 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     );
     await client.query("DELETE FROM order_items WHERE order_id = $1", [req.params.id]);
     if (product_id) {
-      const productResult = await client.query(
-        "SELECT selling_price FROM products WHERE id = $1",
-        [product_id]
+      await client.query(
+        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
+        [req.params.id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, unitPrice]
       );
-      const product = productResult.rows[0];
-      if (product) {
-        await client.query(
-          "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
-          [req.params.id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, product.selling_price || 0]
-        );
-      }
     }
     await client.query("COMMIT");
     setFlash(req, "Order updated");
@@ -1181,11 +1174,15 @@ function orderFormFields(
   const quantityKg = (order as any).quantity_kg ?? "";
   const quantitySachets = (order as any).quantity_sachets ?? "";
   const quantityCartons = (order as any).quantity_cartons ?? "";
+  const isSample = (order as any).is_sample ?? false;
   return `
     <label>Linked Lead<select name="lead_id" id="lead-select"><option value="">— none —</option>${leadOptions}</select></label>
     ${ownerSelect}
     ${driverSelect}
     ${productSelect}
+    <label class="full">
+      <input type="checkbox" name="is_sample" id="is-sample" value="1" ${isSample ? "checked" : ""}> Sample order (price becomes Rs 0)
+    </label>
     <div class="total-price-card full">
       <div class="total-price-label">Total Price</div>
       <div class="total-price-amount" id="total-price-display">Rs 0.00</div>

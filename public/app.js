@@ -128,7 +128,8 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateOrderValue() {
     if (!orderValueInput || !productSelect) return;
     const productOption = productSelect.options[productSelect.selectedIndex];
-    const price = parseFloat(productOption?.dataset?.sellingPrice || "0") || 0;
+    const isSample = document.getElementById("is-sample")?.checked;
+    const price = isSample ? 0 : (parseFloat(productOption?.dataset?.sellingPrice || "0") || 0);
     const kg = parseFloat(quantityKgInput?.value || "0") || 0;
     const total = price * kg;
     orderValueInput.value = total.toFixed(2);
@@ -136,9 +137,13 @@ document.addEventListener("DOMContentLoaded", () => {
     if (totalPriceDetail) {
       const name = selectedProductName();
       if (productOption?.value && kg > 0) {
-        totalPriceDetail.textContent = `${formatCurrency(price)}/kg × ${kg.toFixed(4)} kg${name ? ` (${name})` : ""}`;
+        totalPriceDetail.textContent = isSample
+          ? `Sample — ${formatCurrency(0)}/kg × ${kg.toFixed(4)} kg${name ? ` (${name})` : ""}`
+          : `${formatCurrency(price)}/kg × ${kg.toFixed(4)} kg${name ? ` (${name})` : ""}`;
       } else if (productOption?.value) {
-        totalPriceDetail.textContent = name ? `${name} — ${formatCurrency(price)}/kg` : `${formatCurrency(price)}/kg`;
+        totalPriceDetail.textContent = isSample
+          ? name ? `${name} — Sample` : "Sample order"
+          : name ? `${name} — ${formatCurrency(price)}/kg` : `${formatCurrency(price)}/kg`;
       } else {
         totalPriceDetail.textContent = "Select a product and quantity";
       }
@@ -222,6 +227,13 @@ document.addEventListener("DOMContentLoaded", () => {
           notesInput.value = existing ? `${existing}\n${productLine}` : productLine;
         }
       }
+    });
+  }
+
+  const isSampleCheckbox = document.getElementById("is-sample");
+  if (isSampleCheckbox) {
+    isSampleCheckbox.addEventListener("change", () => {
+      updateOrderValue();
     });
   }
 

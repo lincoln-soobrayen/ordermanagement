@@ -892,6 +892,92 @@ section {
   box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.12);
 }
 
+.sales-order-lines {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  box-shadow: var(--shadow-sm);
+}
+
+.sales-order-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+.sales-order-title {
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.sales-order-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.sales-order-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  min-width: 760px;
+}
+
+.sales-order-table th,
+.sales-order-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.sales-order-table th {
+  background: var(--surface-2);
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sales-order-table tr:last-child td {
+  border-bottom: none;
+}
+
+.sales-order-table select,
+.sales-order-table input {
+  width: 100%;
+  min-width: 100px;
+  margin: 0;
+  padding: 9px 11px;
+  font-size: 0.9rem;
+}
+
+.sales-order-table .line-total {
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.sales-order-table .remove-line {
+  padding: 6px 10px;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.sales-order-lines .empty {
+  margin: 0;
+  padding: 18px 0 0;
+  text-align: center;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

@@ -64,181 +64,207 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // When creating/editing an order, selecting a lead or product navigates to a prefilled form
+  // When creating/editing an order, selecting a lead navigates to a prefilled form
   const leadSelect = document.getElementById("lead-select");
-  const productSelect = document.getElementById("product-select");
   const path = window.location.pathname;
   const isNewOrder = path === "/orders/new";
-
-  function rebuildOrderUrl(changed) {
-    const params = new URLSearchParams(window.location.search);
-    if (changed === "lead") {
-      const leadOption = leadSelect.options[leadSelect.selectedIndex];
-      const leadId = leadSelect.value;
-      const leadUrl = leadOption?.dataset?.url;
-      if (isNewOrder && leadUrl) return leadUrl;
-      if (leadId) params.set("lead_id", leadId);
-      else params.delete("lead_id");
-    }
-    if (changed === "product") {
-      const productOption = productSelect.options[productSelect.selectedIndex];
-      const productId = productSelect.value;
-      if (productId) params.set("product_id", productId);
-      else params.delete("product_id");
-      if (isNewOrder && productId && productOption) {
-        return `/orders/new?${params.toString()}`;
-      }
-    }
-    return `/orders/new?${params.toString()}`;
-  }
 
   if (leadSelect) {
     leadSelect.addEventListener("change", () => {
       if (isNewOrder) {
-        window.location.href = rebuildOrderUrl("lead");
+        const leadOption = leadSelect.options[leadSelect.selectedIndex];
+        const leadUrl = leadOption?.dataset?.url;
+        if (leadUrl) window.location.href = leadUrl;
       }
     });
-  }
-
-  const quantityKgInput = document.getElementById("quantity-kg");
-  const quantitySachetsInput = document.getElementById("quantity-sachets");
-  const quantityCartonsInput = document.getElementById("quantity-cartons");
-  const orderValueInput = document.getElementById("order-value");
-  const totalPriceDisplay = document.getElementById("total-price-display");
-  const totalPriceDetail = document.getElementById("total-price-detail");
-  const quantityModeSelect = document.getElementById("quantity-mode");
-  const quantityRow = document.getElementById("quantity-row");
-
-  function readProductPackaging() {
-    const productOption = productSelect?.options[productSelect.selectedIndex];
-    const kgPerSachet = parseFloat(productOption?.dataset?.kgPerSachet || "1") || 1;
-    const sachetsPerCarton = parseFloat(productOption?.dataset?.sachetsPerCarton || "1") || 1;
-    return { kgPerSachet: Math.max(kgPerSachet, 0.0001), sachetsPerCarton: Math.max(sachetsPerCarton, 0.0001) };
-  }
-
-  function selectedProductName() {
-    const productOption = productSelect?.options[productSelect.selectedIndex];
-    return productOption?.dataset?.name || "";
   }
 
   function formatCurrency(n) {
     return "Rs " + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
-  function updateOrderValue() {
-    if (!orderValueInput || !productSelect) return;
-    const productOption = productSelect.options[productSelect.selectedIndex];
-    const isSample = document.getElementById("is-sample")?.checked;
-    const price = isSample ? 0 : (parseFloat(productOption?.dataset?.sellingPrice || "0") || 0);
-    const kg = parseFloat(quantityKgInput?.value || "0") || 0;
-    const total = price * kg;
-    orderValueInput.value = total.toFixed(2);
-    if (totalPriceDisplay) totalPriceDisplay.textContent = formatCurrency(total);
-    if (totalPriceDetail) {
-      const name = selectedProductName();
-      if (productOption?.value && kg > 0) {
-        totalPriceDetail.textContent = isSample
-          ? `Sample — ${formatCurrency(0)}/kg × ${kg.toFixed(4)} kg${name ? ` (${name})` : ""}`
-          : `${formatCurrency(price)}/kg × ${kg.toFixed(4)} kg${name ? ` (${name})` : ""}`;
-      } else if (productOption?.value) {
-        totalPriceDetail.textContent = isSample
-          ? name ? `${name} — Sample` : "Sample order"
-          : name ? `${name} — ${formatCurrency(price)}/kg` : `${formatCurrency(price)}/kg`;
-      } else {
-        totalPriceDetail.textContent = "Select a product and quantity";
-      }
-    }
-  }
-
-  function syncQuantities(source) {
-    const { kgPerSachet, sachetsPerCarton } = readProductPackaging();
-    if (source === "kg" && quantityKgInput) {
-      const kg = parseFloat(quantityKgInput.value) || 0;
-      const sachets = kg / kgPerSachet;
-      if (quantitySachetsInput) quantitySachetsInput.value = sachets.toFixed(4);
-      if (quantityCartonsInput) quantityCartonsInput.value = (sachets / sachetsPerCarton).toFixed(4);
-    }
-    if (source === "sachets" && quantitySachetsInput) {
-      const sachets = parseFloat(quantitySachetsInput.value) || 0;
-      if (quantityKgInput) quantityKgInput.value = (sachets * kgPerSachet).toFixed(4);
-      if (quantityCartonsInput) quantityCartonsInput.value = (sachets / sachetsPerCarton).toFixed(4);
-    }
-    if (source === "cartons" && quantityCartonsInput) {
-      const cartons = parseFloat(quantityCartonsInput.value) || 0;
-      const sachets = cartons * sachetsPerCarton;
-      if (quantitySachetsInput) quantitySachetsInput.value = sachets.toFixed(4);
-      if (quantityKgInput) quantityKgInput.value = (sachets * kgPerSachet).toFixed(4);
-    }
-    updateOrderValue();
-  }
-
-  function applyQuantityMode() {
-    if (!quantityModeSelect || !quantityRow) return;
-    const mode = quantityModeSelect.value;
-    quantityRow.classList.remove("mode-sachets", "mode-cartons", "mode-both");
-    quantityRow.classList.add(`mode-${mode}`);
-    if (quantitySachetsInput) {
-      const sachetLabel = quantitySachetsInput.closest("label");
-      if (sachetLabel) sachetLabel.style.display = mode === "cartons" ? "none" : "";
-    }
-    if (quantityCartonsInput) {
-      const cartonLabel = quantityCartonsInput.closest("label");
-      if (cartonLabel) cartonLabel.style.display = mode === "sachets" ? "none" : "";
-    }
-  }
-
-  if (quantityModeSelect) {
-    quantityModeSelect.addEventListener("change", () => {
-      applyQuantityMode();
-      if (quantitySachetsInput && quantitySachetsInput.value) syncQuantities("sachets");
-      else if (quantityCartonsInput && quantityCartonsInput.value) syncQuantities("cartons");
-      else if (quantityKgInput && quantityKgInput.value) syncQuantities("kg");
-    });
-    applyQuantityMode();
-  }
-
-  if (quantityKgInput) {
-    quantityKgInput.addEventListener("input", () => syncQuantities("kg"));
-  }
-  if (quantitySachetsInput) {
-    quantitySachetsInput.addEventListener("input", () => syncQuantities("sachets"));
-  }
-  if (quantityCartonsInput) {
-    quantityCartonsInput.addEventListener("input", () => syncQuantities("cartons"));
-  }
-
-  if (productSelect) {
-    productSelect.addEventListener("change", () => {
-      const productOption = productSelect.options[productSelect.selectedIndex];
-      if (isNewOrder) {
-        const url = rebuildOrderUrl("product");
-        if (url) window.location.href = url;
-        return;
-      }
-      const notesInput = document.getElementById("order-notes");
-      if (productOption && productOption.value) {
-        syncQuantities("kg");
-      }
-      if (productOption && notesInput && productOption.value) {
-        const productName = productOption.dataset.name;
-        const existing = notesInput.value;
-        const productLine = `Product: ${productName}`;
-        if (!existing.includes(productLine)) {
-          notesInput.value = existing ? `${existing}\n${productLine}` : productLine;
-        }
-      }
-    });
-  }
-
+  // Sales order lines (multi-product order form)
+  const salesOrderTableBody = document.getElementById("sales-order-lines-body");
+  const salesOrderLineTemplate = document.getElementById("sales-order-line-template");
+  const addLineButton = document.getElementById("add-order-line");
+  const totalPriceDisplay = document.getElementById("total-price-display");
+  const totalPriceDetail = document.getElementById("total-price-detail");
   const isSampleCheckbox = document.getElementById("is-sample");
-  if (isSampleCheckbox) {
-    isSampleCheckbox.addEventListener("change", () => {
-      updateOrderValue();
-    });
-  }
+  const noLinesMessage = document.getElementById("no-lines-message");
 
-  // Initialise total if values already present
-  updateOrderValue();
+  if (salesOrderTableBody && salesOrderLineTemplate && window.salesOrderData) {
+    const products = window.salesOrderData.products || [];
+    let lines = (window.salesOrderData.lines || []).map((line) => ({
+      product_id: line.product_id || "",
+      quantity_kg: line.quantity_kg || "",
+      quantity_sachets: line.quantity_sachets || "",
+      quantity_cartons: line.quantity_cartons || "",
+      unit_price: line.unit_price || "",
+    }));
+
+    function getProduct(id) {
+      return products.find((p) => String(p.id) === String(id));
+    }
+
+    function renderLine(line, index) {
+      const clone = salesOrderLineTemplate.content.cloneNode(true);
+      const row = clone.querySelector("tr");
+      row.dataset.index = index;
+
+      const productSelect = clone.querySelector(".line-product");
+      const kgInput = clone.querySelector(".line-qty-kg");
+      const sachetsInput = clone.querySelector(".line-qty-sachets");
+      const cartonsInput = clone.querySelector(".line-qty-cartons");
+      const priceInput = clone.querySelector(".line-unit-price");
+      const removeBtn = clone.querySelector(".remove-line");
+
+      productSelect.value = line.product_id || "";
+      kgInput.value = line.quantity_kg || "";
+      sachetsInput.value = line.quantity_sachets || "";
+      cartonsInput.value = line.quantity_cartons || "";
+      priceInput.value = line.unit_price || "";
+
+      productSelect.addEventListener("change", () => {
+        const product = getProduct(productSelect.value);
+        const isSample = isSampleCheckbox?.checked;
+        if (product && !isSample && !priceInput.value) {
+          priceInput.value = Number(product.selling_price).toFixed(2);
+        }
+        recalcRow(row);
+      });
+
+      kgInput.addEventListener("input", () => syncRowQuantities(row, "kg"));
+      sachetsInput.addEventListener("input", () => syncRowQuantities(row, "sachets"));
+      cartonsInput.addEventListener("input", () => syncRowQuantities(row, "cartons"));
+      priceInput.addEventListener("input", () => recalcRow(row));
+
+      removeBtn.addEventListener("click", () => {
+        row.remove();
+        updateTotals();
+      });
+
+      salesOrderTableBody.appendChild(clone);
+      recalcRow(row);
+    }
+
+    function readRowPackaging(row) {
+      const productSelect = row.querySelector(".line-product");
+      const product = getProduct(productSelect.value);
+      const kgPerSachet = product?.kg_per_sachet || 1;
+      const sachetsPerCarton = product?.sachets_per_carton || 1;
+      return {
+        kgPerSachet: Math.max(parseFloat(kgPerSachet) || 1, 0.0001),
+        sachetsPerCarton: Math.max(parseFloat(sachetsPerCarton) || 1, 0.0001),
+      };
+    }
+
+    function syncRowQuantities(row, source) {
+      const { kgPerSachet, sachetsPerCarton } = readRowPackaging(row);
+      const kgInput = row.querySelector(".line-qty-kg");
+      const sachetsInput = row.querySelector(".line-qty-sachets");
+      const cartonsInput = row.querySelector(".line-qty-cartons");
+
+      if (source === "kg") {
+        const kg = parseFloat(kgInput.value) || 0;
+        const sachets = kg / kgPerSachet;
+        sachetsInput.value = sachets.toFixed(4);
+        cartonsInput.value = (sachets / sachetsPerCarton).toFixed(4);
+      } else if (source === "sachets") {
+        const sachets = parseFloat(sachetsInput.value) || 0;
+        kgInput.value = (sachets * kgPerSachet).toFixed(4);
+        cartonsInput.value = (sachets / sachetsPerCarton).toFixed(4);
+      } else if (source === "cartons") {
+        const cartons = parseFloat(cartonsInput.value) || 0;
+        const sachets = cartons * sachetsPerCarton;
+        sachetsInput.value = sachets.toFixed(4);
+        kgInput.value = (sachets * kgPerSachet).toFixed(4);
+      }
+      recalcRow(row);
+    }
+
+    function recalcRow(row) {
+      const kgInput = row.querySelector(".line-qty-kg");
+      const priceInput = row.querySelector(".line-unit-price");
+      const totalCell = row.querySelector(".line-total");
+      const kg = parseFloat(kgInput.value) || 0;
+      const price = parseFloat(priceInput.value) || 0;
+      const total = kg * price;
+      totalCell.textContent = formatCurrency(total);
+      updateTotals();
+    }
+
+    function updateTotals() {
+      const rows = salesOrderTableBody.querySelectorAll("tr");
+      let total = 0;
+      rows.forEach((row) => {
+        const totalText = row.querySelector(".line-total")?.textContent || "";
+        total += Number(totalText.replace(/[^0-9.-]+/g, "")) || 0;
+      });
+      if (totalPriceDisplay) totalPriceDisplay.textContent = formatCurrency(total);
+      if (totalPriceDetail) totalPriceDetail.textContent = `${rows.length} product line${rows.length === 1 ? "" : "s"}`;
+      if (noLinesMessage) noLinesMessage.style.display = rows.length === 0 ? "" : "none";
+    }
+
+    function addLine() {
+      renderLine({ product_id: "", quantity_kg: "", quantity_sachets: "", quantity_cartons: "", unit_price: "" }, lines.length);
+    }
+
+    if (addLineButton) {
+      addLineButton.addEventListener("click", addLine);
+    }
+
+    if (isSampleCheckbox) {
+      isSampleCheckbox.addEventListener("change", () => {
+        const isSample = isSampleCheckbox.checked;
+        const rows = salesOrderTableBody.querySelectorAll("tr");
+        rows.forEach((row) => {
+          const priceInput = row.querySelector(".line-unit-price");
+          if (isSample) {
+            priceInput.dataset.originalPrice = priceInput.value;
+            priceInput.value = "0.00";
+            priceInput.disabled = true;
+          } else {
+            priceInput.disabled = false;
+            const productSelect = row.querySelector(".line-product");
+            const product = getProduct(productSelect.value);
+            const original = priceInput.dataset.originalPrice;
+            if (original) {
+              priceInput.value = original;
+            } else if (product) {
+              priceInput.value = Number(product.selling_price).toFixed(2);
+            }
+          }
+          recalcRow(row);
+        });
+      });
+    }
+
+    // Render initial lines
+    salesOrderTableBody.innerHTML = "";
+    if (lines.length > 0) {
+      lines.forEach((line, index) => renderLine(line, index));
+    } else {
+      addLine();
+    }
+
+    // If sample is pre-checked, disable prices and zero them
+    if (isSampleCheckbox?.checked) {
+      const rows = salesOrderTableBody.querySelectorAll("tr");
+      rows.forEach((row) => {
+        const priceInput = row.querySelector(".line-unit-price");
+        if (!priceInput.value) {
+          const productSelect = row.querySelector(".line-product");
+          const product = getProduct(productSelect.value);
+          priceInput.dataset.originalPrice = product ? Number(product.selling_price).toFixed(2) : "";
+        } else {
+          priceInput.dataset.originalPrice = priceInput.value;
+        }
+        priceInput.value = "0.00";
+        priceInput.disabled = true;
+        recalcRow(row);
+      });
+    }
+  }
 
   // Copy order summary to clipboard for WhatsApp
   document.querySelectorAll(".copy-whatsapp").forEach((btn) => {

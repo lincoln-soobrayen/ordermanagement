@@ -119,6 +119,60 @@ async function canAccessDelivery(req: Request, orderId: number): Promise<boolean
   return result.rows.length > 0;
 }
 
+interface OrderLineInput {
+  product_id: number;
+  quantity_kg: number;
+  quantity_sachets: number;
+  quantity_cartons: number;
+  unit_price: number;
+}
+
+function parseOrderLines(req: Request, isSample: boolean): OrderLineInput[] {
+  // express.urlencoded with extended:true strips the [] suffix and gives arrays
+  const productIds = req.body.product_id;
+  const quantityKgList = req.body.quantity_kg;
+  const quantitySachetsList = req.body.quantity_sachets;
+  const quantityCartonsList = req.body.quantity_cartons;
+  const unitPrices = req.body.unit_price;
+
+  const toArray = (val: any): any[] => {
+    if (val === undefined || val === null) return [];
+    return Array.isArray(val) ? val : [val];
+  };
+
+  const ids = toArray(productIds);
+  const kgs = toArray(quantityKgList);
+  const sachets = toArray(quantitySachetsList);
+  const cartons = toArray(quantityCartonsList);
+  const prices = toArray(unitPrices);
+
+  const lines: OrderLineInput[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const productId = parseInt(ids[i], 10);
+    if (!productId) continue;
+    const kg = parseFloat(kgs[i]) || 0;
+    const linePrice = isSample ? 0 : (parseFloat(prices[i]) || 0);
+    lines.push({
+      product_id: productId,
+      quantity_kg: kg,
+      quantity_sachets: parseFloat(sachets[i]) || 0,
+      quantity_cartons: parseFloat(cartons[i]) || 0,
+      unit_price: linePrice,
+    });
+  }
+  return lines;
+}
+
+async function customerNameFromLead(leadId: string | number | undefined): Promise<string | null> {
+  if (!leadId) return null;
+  const id = typeof leadId === "number" ? leadId : parseInt(leadId, 10);
+  if (!id) return null;
+  const result = await pool.query("SELECT name, company FROM leads WHERE id = $1", [id]);
+  const lead = result.rows[0];
+  if (!lead) return null;
+  return lead.company ? `${lead.name} (${lead.company})` : lead.name;
+}
+
 function flash(req: Request): { message?: string; type?: "success" | "error" } {
   const data = req.session.flash || {};
   delete req.session.flash;
@@ -766,7 +820,6 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
   const { lead_id, product_id } = req.query as { lead_id?: string; product_id?: string };
   let prefilled: Partial<Order> = {};
   const leadF = await leadFilter(req);
-  const orderF = await orderFilter(req);
   let leads = await pool.query(
     `SELECT id, name, company FROM leads WHERE 1=1${leadF.where} ORDER BY company, name`,
     leadF.params
@@ -786,6 +839,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
     }
   }
   const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
+  let initialLines: { product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; unit_price?: number }[] = [];
   if (lead_id) {
     const leadResult = await pool.query(
       "SELECT id, name, company, email, phone, value, delivery_location FROM leads WHERE id = $1",
@@ -796,7 +850,6 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
       prefilled = {
         lead_id: parseInt(lead_id, 10),
         customer_name: lead.company ? `${lead.name} (${lead.company})` : lead.name,
-        order_value: lead.value || 0,
         delivery_address: lead.delivery_location || null,
         notes: `Lead contact: ${lead.email || lead.phone || "none"}`,
       };
@@ -809,8 +862,13 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
     );
     const product = productResult.rows[0];
     if (product) {
-      (prefilled as OrderWithProduct).product_id = parseInt(product_id, 10);
-      prefilled.order_value = product.selling_price || 0;
+      initialLines = [{
+        product_id: parseInt(product_id, 10),
+        unit_price: product.selling_price || 0,
+        quantity_kg: 0,
+        quantity_sachets: 0,
+        quantity_cartons: 0,
+      }];
       prefilled.notes = prefilled.notes
         ? `${prefilled.notes}\nProduct: ${product.name}`
         : `Product: ${product.name}`;
@@ -822,7 +880,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
       `
       <h1>New Order</h1>
       <form method="post" action="/orders" class="form-grid">
-        ${orderFormFields(prefilled, leads.rows, products.rows, owners, drivers)}
+        ${orderFormFields(prefilled, leads.rows, products.rows, owners, drivers, initialLines)}
         <div class="actions">
           <button type="submit">Save Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -834,8 +892,9 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
 });
 
 app.post("/orders", requireAuth, blockDriver, async (req, res) => {
-  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
+  const { lead_id, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
   const isSample = Boolean(req.body.is_sample);
+  const lines = parseOrderLines(req, isSample);
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -845,22 +904,11 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
       return;
     }
   }
+  const customer_name = await customerNameFromLead(lead_id);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    let finalOrderValue = 0;
-    let unitPrice = 0;
-    if (product_id) {
-      const productResult = await client.query(
-        "SELECT selling_price FROM products WHERE id = $1",
-        [product_id]
-      );
-      const product = productResult.rows[0];
-      if (product) {
-        unitPrice = isSample ? 0 : (product.selling_price || 0);
-        finalOrderValue = (parseFloat(quantity_kg) || 0) * unitPrice;
-      }
-    }
+    const finalOrderValue = lines.reduce((sum, line) => sum + line.quantity_kg * line.unit_price, 0);
     const orderResult = await client.query(
       "INSERT INTO orders (lead_id, user_id, driver_id, customer_name, order_value, status, order_date, delivery_status, delivery_address, delivery_date, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
       [
@@ -877,10 +925,10 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
         notes || null,
       ]
     );
-    if (product_id) {
+    for (const line of lines) {
       await client.query(
         "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
-        [orderResult.rows[0].id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, unitPrice]
+        [orderResult.rows[0].id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
       );
     }
     await client.query("COMMIT");
@@ -907,7 +955,7 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
   }
   const leadF = await leadFilter(req);
   const leads = await pool.query(
-    `SELECT id, name FROM leads WHERE 1=1${leadF.where} ORDER BY name`,
+    `SELECT id, name, company FROM leads WHERE 1=1${leadF.where} ORDER BY company, name`,
     leadF.params
   );
   const products = await pool.query("SELECT id, name, cost_price, selling_price, kg_per_sachet, sachets_per_carton FROM products ORDER BY name");
@@ -923,16 +971,18 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
   }
   const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
   const orderItemResult = await pool.query(
-    "SELECT product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price FROM order_items WHERE order_id = $1 LIMIT 1",
+    "SELECT product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price FROM order_items WHERE order_id = $1 ORDER BY id",
     [req.params.id]
   );
-  const orderItem = orderItemResult.rows[0];
-  if (orderItem) {
-    (order as any).product_id = orderItem.product_id;
-    (order as any).quantity_kg = orderItem.quantity_kg;
-    (order as any).quantity_sachets = orderItem.quantity_sachets;
-    (order as any).quantity_cartons = orderItem.quantity_cartons;
-    (order as any).is_sample = (orderItem.unit_price || 0) === 0;
+  const editLines = orderItemResult.rows.map((item) => ({
+    product_id: item.product_id,
+    quantity_kg: item.quantity_kg,
+    quantity_sachets: item.quantity_sachets,
+    quantity_cartons: item.quantity_cartons,
+    unit_price: item.unit_price,
+  }));
+  if (editLines.length > 0) {
+    (order as any).is_sample = (editLines[0].unit_price || 0) === 0;
   }
   res.send(
     renderPage(
@@ -940,7 +990,7 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
       `
       <h1>Edit Order</h1>
       <form method="post" action="/orders/${escapeHtml(order.id)}/update" class="form-grid">
-        ${orderFormFields(order, leads.rows, products.rows, owners, drivers)}
+        ${orderFormFields(order, leads.rows, products.rows, owners, drivers, editLines)}
         <div class="actions">
           <button type="submit">Update Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -956,8 +1006,9 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
-  const { lead_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, customer_name, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
+  const { lead_id, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
   const isSample = Boolean(req.body.is_sample);
+  const lines = parseOrderLines(req, isSample);
   const admin = isAdmin(req);
   let user_id = req.body.user_id;
   if (!admin) {
@@ -967,22 +1018,11 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
       return;
     }
   }
+  const customer_name = await customerNameFromLead(lead_id);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    let finalOrderValue = 0;
-    let unitPrice = 0;
-    if (product_id) {
-      const productResult = await client.query(
-        "SELECT selling_price FROM products WHERE id = $1",
-        [product_id]
-      );
-      const product = productResult.rows[0];
-      if (product) {
-        unitPrice = isSample ? 0 : (product.selling_price || 0);
-        finalOrderValue = (parseFloat(quantity_kg) || 0) * unitPrice;
-      }
-    }
+    const finalOrderValue = lines.reduce((sum, line) => sum + line.quantity_kg * line.unit_price, 0);
     await client.query(
       "UPDATE orders SET lead_id = $1, user_id = $2, driver_id = $3, customer_name = $4, order_value = $5, delivery_status = $6, delivery_address = $7, delivery_date = $8, notes = $9, updated_at = CURRENT_TIMESTAMP WHERE id = $10",
       [
@@ -999,10 +1039,10 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
       ]
     );
     await client.query("DELETE FROM order_items WHERE order_id = $1", [req.params.id]);
-    if (product_id) {
+    for (const line of lines) {
       await client.query(
         "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
-        [req.params.id, product_id, parseFloat(quantity_kg) || 0, parseFloat(quantity_sachets) || 0, parseFloat(quantity_cartons) || 0, unitPrice]
+        [req.params.id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
       );
     }
     await client.query("COMMIT");
@@ -1120,7 +1160,8 @@ function orderFormFields(
   leads: { id: number; name: string; company?: string }[],
   products: { id: number; name: string; cost_price: number; selling_price: number; kg_per_sachet: number; sachets_per_carton: number }[] = [],
   owners: { id: number; name: string; role: string }[] = [],
-  drivers: { id: number; name: string }[] = []
+  drivers: { id: number; name: string }[] = [],
+  lines: { product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; unit_price?: number }[] = []
 ): string {
   const leadOptions = leads
     .map(
@@ -1132,16 +1173,10 @@ function orderFormFields(
     .join("");
   const productOptions = products
     .map(
-      (p) => {
-        const urlParams = new URLSearchParams();
-        if (order.lead_id) urlParams.set("lead_id", String(order.lead_id));
-        urlParams.set("product_id", String(p.id));
-        return `<option value="${p.id}" data-selling-price="${p.selling_price || 0}" data-kg-per-sachet="${p.kg_per_sachet || 1}" data-sachets-per-carton="${p.sachets_per_carton || 1}" data-name="${escapeHtml(p.name)}" data-url="/orders/new?${escapeHtml(
-          urlParams.toString()
-        )}" ${p.id === order.product_id ? "selected" : ""}>${escapeHtml(p.name)} — Rs ${Number(
+      (p) =>
+        `<option value="${p.id}" data-selling-price="${p.selling_price || 0}" data-kg-per-sachet="${p.kg_per_sachet || 1}" data-sachets-per-carton="${p.sachets_per_carton || 1}" data-name="${escapeHtml(p.name)}" ${p.id === order.product_id ? "selected" : ""}>${escapeHtml(p.name)} — Rs ${Number(
           p.selling_price || 0
-        ).toLocaleString()}/kg</option>`;
-      }
+        ).toLocaleString()}/kg</option>`
     )
     .join("");
   const ownerOptions = owners
@@ -1167,46 +1202,53 @@ function orderFormFields(
   const dateStr = order.order_date
     ? new Date(order.order_date).toISOString().split("T")[0]
     : new Date().toISOString().split("T")[0];
-  const shippedStr = "";
-  const productSelect = products.length
-    ? `<label>Product (optional)<select name="product_id" id="product-select"><option value="">— none —</option>${productOptions}</select></label>`
-    : "<p class=\"empty\">No products yet. <a href=\"/products/new\">Add one</a>.</p>";
-  const quantityKg = (order as any).quantity_kg ?? "";
-  const quantitySachets = (order as any).quantity_sachets ?? "";
-  const quantityCartons = (order as any).quantity_cartons ?? "";
   const isSample = (order as any).is_sample ?? false;
+  const initialLines = lines.length > 0 ? lines : [{ product_id: order.product_id || 0, quantity_kg: 0, quantity_sachets: 0, quantity_cartons: 0, unit_price: 0 }];
+  const productData = products.map((p) => ({
+    id: p.id,
+    name: p.name,
+    selling_price: p.selling_price || 0,
+    kg_per_sachet: p.kg_per_sachet || 1,
+    sachets_per_carton: p.sachets_per_carton || 1,
+  }));
+  const linesJson = JSON.stringify(initialLines);
+  const productDataJson = JSON.stringify(productData);
   return `
     <label>Linked Lead<select name="lead_id" id="lead-select"><option value="">— none —</option>${leadOptions}</select></label>
     ${ownerSelect}
     ${driverSelect}
-    ${productSelect}
     <label class="full">
       <input type="checkbox" name="is_sample" id="is-sample" value="1" ${isSample ? "checked" : ""}> Sample order (price becomes Rs 0)
     </label>
+    <div class="sales-order-lines full">
+      <div class="sales-order-header">
+        <span class="sales-order-title">Order Lines</span>
+        <button type="button" class="button small secondary" id="add-order-line">+ Add Product</button>
+      </div>
+      <div class="sales-order-table-wrap">
+        <table class="sales-order-table" id="sales-order-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Qty (kg)</th>
+              <th>Qty (sachets)</th>
+              <th>Qty (cartons)</th>
+              <th>Unit Price</th>
+              <th>Line Total</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="sales-order-lines-body">
+          </tbody>
+        </table>
+      </div>
+      <p class="empty" id="no-lines-message" style="display: none;">No products added. Click "Add Product" to start.</p>
+    </div>
     <div class="total-price-card full">
-      <div class="total-price-label">Total Price</div>
+      <div class="total-price-label">Order Total</div>
       <div class="total-price-amount" id="total-price-display">Rs 0.00</div>
-      <div class="total-price-detail" id="total-price-detail">Select a product and quantity</div>
+      <div class="total-price-detail" id="total-price-detail">0 items</div>
     </div>
-    <div class="order-quantity-card full">
-      <div class="order-quantity-header">
-        <span class="order-quantity-title">Order Quantity</span>
-        <select name="quantity_mode" id="quantity-mode">
-          <option value="sachets">Sachets</option>
-          <option value="cartons">Cartons</option>
-          <option value="both">Both</option>
-        </select>
-      </div>
-      <div class="quantity-row" id="quantity-row">
-        <label class="qty-sachets">Quantity (sachets)<input type="number" step="0.0001" name="quantity_sachets" id="quantity-sachets" value="${escapeHtml(quantitySachets)}" placeholder="sachets" inputmode="decimal"></label>
-        <label class="qty-cartons">Quantity (cartons)<input type="number" step="0.0001" name="quantity_cartons" id="quantity-cartons" value="${escapeHtml(quantityCartons)}" placeholder="cartons" inputmode="decimal"></label>
-      </div>
-      <label class="qty-kg full">Quantity (kg)<input type="number" step="0.0001" name="quantity_kg" id="quantity-kg" value="${escapeHtml(quantityKg)}" placeholder="kg" inputmode="decimal"></label>
-    </div>
-    <label>Customer Name *<input type="text" name="customer_name" id="customer-name" value="${escapeHtml(
-      order.customer_name
-    )}" required></label>
-    <input type="hidden" name="order_value" id="order-value" value="${escapeHtml(order.order_value ?? "")}">
     <input type="hidden" name="status" value="order_placed">
     <input type="hidden" name="order_date" value="${escapeHtml(dateStr)}">
     <label>Delivery Status<select name="delivery_status">${statusOptions(
@@ -1220,6 +1262,29 @@ function orderFormFields(
       order.delivery_address
     )}</textarea></label>
     <label class="full">Notes<textarea name="notes" id="order-notes" rows="4">${escapeHtml(order.notes)}</textarea></label>
+    <script>
+      window.salesOrderData = {
+        lines: ${linesJson},
+        products: ${productDataJson},
+        isSample: ${isSample ? "true" : "false"}
+      };
+    </script>
+    <template id="sales-order-line-template">
+      <tr class="sales-order-line">
+        <td>
+          <select name="product_id[]" class="line-product" required>
+            <option value="">— Select product —</option>
+            ${productOptions}
+          </select>
+        </td>
+        <td><input type="number" step="0.0001" name="quantity_kg[]" class="line-qty-kg" placeholder="kg" inputmode="decimal"></td>
+        <td><input type="number" step="0.0001" name="quantity_sachets[]" class="line-qty-sachets" placeholder="sachets" inputmode="decimal"></td>
+        <td><input type="number" step="0.0001" name="quantity_cartons[]" class="line-qty-cartons" placeholder="cartons" inputmode="decimal"></td>
+        <td><input type="number" step="0.01" name="unit_price[]" class="line-unit-price" placeholder="Rs/kg" inputmode="decimal"></td>
+        <td class="line-total">Rs 0.00</td>
+        <td><button type="button" class="button small danger remove-line">×</button></td>
+      </tr>
+    </template>
   `;
 }
 

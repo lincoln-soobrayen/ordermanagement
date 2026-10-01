@@ -1161,10 +1161,10 @@ app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
 
 app.get("/deliveries", requireAuth, async (req, res) => {
   const { status, region, q } = req.query as { status?: string; region?: string; q?: string };
+  // Salespeople share the delivery board; drivers only see orders assigned to them.
   const driver = isDriver(req);
-  const orderF = await orderFilter(req, "o");
-  let where = `WHERE o.status != 'cancelled'${orderF.where}`;
-  const params: (string | number | undefined)[] = [...orderF.params];
+  let where = "WHERE o.status != 'cancelled'";
+  const params: (string | number | undefined)[] = [];
 
   if (driver) {
     params.push(req.session.user!.id);
@@ -1410,7 +1410,7 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Order ID</th><th>Lead ID</th><th>Customer</th>${showAdminColumns ? "<th>Driver</th>" : ""}<th>Region</th><th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
+        <tr><th>Order ID</th><th>Lead ID</th><th>Customer</th>${showAdminColumns ? "<th>Salesperson</th><th>Driver</th>" : ""}<th>Region</th><th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
       </thead>
       <tbody>
         ${rows
@@ -1453,7 +1453,7 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
             <td>${escapeHtml(o.id)}</td>
             <td>${escapeHtml(o.lead_id || "—")}</td>
             <td>${escapeHtml(o.customer_name)}</td>
-            ${showAdminColumns ? `<td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
+            ${showAdminColumns ? `<td>${escapeHtml(o.owner_name || "—")}</td><td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
             <td>${escapeHtml(regionLabel)}</td>
             <td>${addressCell}</td>
             <td>${escapeHtml(deliveryDate)}</td>

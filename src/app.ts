@@ -2141,13 +2141,39 @@ function money(n: number): string {
   return `Rs ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+const MARGIN_HINT =
+  "Revenue, cost and margin count paid orders only. Free samples are shown separately as sample cost. Cancelled orders are excluded, and cost uses each product's current cost price.";
+
+// One row per order line, flagged when its order is a free sample.
+function marginLinesSql(where: string): string {
+  return `SELECT o.id AS order_id, o.order_date, o.customer_name, ${SAMPLE_ORDER_SQL} AS is_sample,
+                 oi.unit_price * oi.quantity_kg AS amount, p.cost_price * oi.quantity_kg AS cost
+          FROM orders o
+          JOIN order_items oi ON o.id = oi.order_id
+          JOIN products p ON oi.product_id = p.id
+          ${where}`;
+}
+
+const marginAggregatesSql = `
+  COUNT(DISTINCT order_id) FILTER (WHERE NOT is_sample) AS orders,
+  COUNT(DISTINCT order_id) FILTER (WHERE is_sample) AS samples,
+  COALESCE(SUM(amount) FILTER (WHERE NOT is_sample), 0)::numeric AS revenue,
+  COALESCE(SUM(cost) FILTER (WHERE NOT is_sample), 0)::numeric AS cost,
+  COALESCE(SUM(amount - cost) FILTER (WHERE NOT is_sample), 0)::numeric AS margin,
+  COALESCE(SUM(cost) FILTER (WHERE is_sample), 0)::numeric AS sample_cost`;
+
+function sampleCostCell(r: { samples: number | string; sample_cost: number | string }): string {
+  const samples = Number(r.samples || 0);
+  return samples > 0 ? `${money(Number(r.sample_cost))} (${samples})` : "—";
+}
+
 app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) => {
   const { range } = req.query as { range?: string };
   const selectedRange = range || "last_12_months";
   const dateRange = getDateRange(selectedRange);
   const orderF = await orderFilter(req, "o");
 
-  let where = "WHERE 1=1";
+  let where = "WHERE o.status != 'cancelled'";
   const params: (string | number | undefined)[] = [...orderF.params];
   where += orderF.where;
   if (dateRange.from) {
@@ -2160,16 +2186,10 @@ app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) =>
   }
 
   const result = await pool.query(
-    `SELECT TO_CHAR(o.order_date, 'YYYY-MM') as month,
-            COUNT(DISTINCT o.id) as orders,
-            COALESCE(SUM(oi.unit_price * oi.quantity_kg), 0)::numeric as revenue,
-            COALESCE(SUM(p.cost_price * oi.quantity_kg), 0)::numeric as cost,
-            COALESCE(SUM((oi.unit_price - p.cost_price) * oi.quantity_kg), 0)::numeric as margin
-     FROM orders o
-     JOIN order_items oi ON o.id = oi.order_id
-     JOIN products p ON oi.product_id = p.id
-     ${where}
-     GROUP BY TO_CHAR(o.order_date, 'YYYY-MM')
+    `WITH lines AS (${marginLinesSql(where)})
+     SELECT TO_CHAR(order_date, 'YYYY-MM') as month, ${marginAggregatesSql}
+     FROM lines
+     GROUP BY TO_CHAR(order_date, 'YYYY-MM')
      ORDER BY month DESC`,
     params
   );
@@ -2177,6 +2197,7 @@ app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) =>
   const totalRevenue = result.rows.reduce((sum, r) => sum + Number(r.revenue), 0);
   const totalCost = result.rows.reduce((sum, r) => sum + Number(r.cost), 0);
   const totalMargin = result.rows.reduce((sum, r) => sum + Number(r.margin), 0);
+  const totalSampleCost = result.rows.reduce((sum, r) => sum + Number(r.sample_cost), 0);
 
   const tableRows = result.rows
     .map(
@@ -2187,6 +2208,7 @@ app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) =>
           <td>${escapeHtml(money(r.revenue))}</td>
           <td>${escapeHtml(money(r.cost))}</td>
           <td>${escapeHtml(money(r.margin))}</td>
+          <td>${escapeHtml(sampleCostCell(r))}</td>
         </tr>`
     )
     .join("");
@@ -2224,6 +2246,7 @@ app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) =>
         <div class="card highlight"><strong>${escapeHtml(money(totalRevenue))}</strong><span>Total Revenue</span></div>
         <div class="card"><strong>${escapeHtml(money(totalCost))}</strong><span>Total Cost</span></div>
         <div class="card"><strong>${escapeHtml(money(totalMargin))}</strong><span>Total Margin</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalSampleCost))}</strong><span>Sample cost (not in margin)</span></div>
       </section>
       <section>
         <div class="toolbar">
@@ -2236,11 +2259,12 @@ app.get("/reports/monthly-margin", requireAuth, blockDriver, async (req, res) =>
         </div>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Month</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
-            <tbody>${tableRows || '<tr><td colspan="5" class="empty">No data for selected range</td></tr>'}</tbody>
+            <thead><tr><th>Month</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th><th>Samples</th></tr></thead>
+            <tbody>${tableRows || '<tr><td colspan="6" class="empty">No data for selected range</td></tr>'}</tbody>
           </table>
         </div>
-      </section>`,
+      </section>
+      <p class="hint">${MARGIN_HINT}</p>`,
       req
     )
   );
@@ -2253,7 +2277,7 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
   const dateRange = getDateRange(selectedRange);
   const orderF = await orderFilter(req, "o");
 
-  let where = "WHERE 1=1";
+  let where = "WHERE o.status != 'cancelled'";
   const params: (string | number | undefined)[] = [...orderF.params];
   where += orderF.where;
   if (dateRange.from) {
@@ -2266,17 +2290,19 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
   }
 
   const result = await pool.query(
-    `SELECT o.customer_name,
-            COUNT(DISTINCT o.id) as orders,
-            COALESCE(SUM(oi.unit_price * oi.quantity_kg), 0)::numeric as revenue,
-            COALESCE(SUM(p.cost_price * oi.quantity_kg), 0)::numeric as cost,
-            COALESCE(SUM((oi.unit_price - p.cost_price) * oi.quantity_kg), 0)::numeric as margin
-     FROM orders o
-     JOIN order_items oi ON o.id = oi.order_id
-     JOIN products p ON oi.product_id = p.id
-     ${where}
-     GROUP BY o.customer_name
-     ORDER BY margin DESC
+    `WITH lines AS (${marginLinesSql(where)}),
+     clients AS (
+       SELECT customer_name, ${marginAggregatesSql}
+       FROM lines
+       GROUP BY customer_name
+     )
+     SELECT clients.*,
+            SUM(revenue) OVER () AS total_revenue,
+            SUM(cost) OVER () AS total_cost,
+            SUM(margin) OVER () AS total_margin,
+            SUM(sample_cost) OVER () AS total_sample_cost
+     FROM clients
+     ORDER BY margin DESC, revenue DESC, customer_name
      LIMIT $${params.length + 1}`,
     [...params, selectedLimit]
   );
@@ -2285,9 +2311,11 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
   const revenueData = result.rows.map((r) => Number(r.revenue));
   const marginData = result.rows.map((r) => Number(r.margin));
 
-  const totalRevenue = revenueData.reduce((a, b) => a + b, 0);
-  const totalCost = result.rows.reduce((sum, r) => sum + Number(r.cost), 0);
-  const totalMargin = marginData.reduce((a, b) => a + b, 0);
+  const totals = result.rows[0] || {};
+  const totalRevenue = Number(totals.total_revenue || 0);
+  const totalCost = Number(totals.total_cost || 0);
+  const totalMargin = Number(totals.total_margin || 0);
+  const totalSampleCost = Number(totals.total_sample_cost || 0);
 
   const tableRows = result.rows
     .map(
@@ -2298,6 +2326,7 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
           <td>${escapeHtml(money(r.revenue))}</td>
           <td>${escapeHtml(money(r.cost))}</td>
           <td>${escapeHtml(money(r.margin))}</td>
+          <td>${escapeHtml(sampleCostCell(r))}</td>
         </tr>`
     )
     .join("");
@@ -2336,6 +2365,7 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
         <div class="card highlight"><strong>${escapeHtml(money(totalRevenue))}</strong><span>Total Revenue</span></div>
         <div class="card"><strong>${escapeHtml(money(totalCost))}</strong><span>Total Cost</span></div>
         <div class="card"><strong>${escapeHtml(money(totalMargin))}</strong><span>Total Margin</span></div>
+        <div class="card"><strong>${escapeHtml(money(totalSampleCost))}</strong><span>Sample cost (not in margin)</span></div>
       </section>
       <section>
         <div class="toolbar">
@@ -2361,11 +2391,12 @@ app.get("/reports/client-margin", requireAuth, blockDriver, async (req, res) => 
         <h2>Client Data</h2>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Client</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th></tr></thead>
-            <tbody>${tableRows || '<tr><td colspan="5" class="empty">No data for selected range</td></tr>'}</tbody>
+            <thead><tr><th>Client</th><th>Orders</th><th>Revenue</th><th>Cost</th><th>Margin</th><th>Samples</th></tr></thead>
+            <tbody>${tableRows || '<tr><td colspan="6" class="empty">No data for selected range</td></tr>'}</tbody>
           </table>
         </div>
       </section>
+      <p class="hint">${MARGIN_HINT} Totals cover all clients in the period, not only the ones listed.</p>
       <script>
         window.clientMarginData = {
           labels: ${JSON.stringify(labels)},
@@ -2487,6 +2518,8 @@ async function queryClients(req: Request, filters: ClientListFilters) {
             COALESCE(s.revenue, 0)::numeric AS revenue,
             COALESCE(s.cost, 0)::numeric AS cost,
             (COALESCE(s.revenue, 0) - COALESCE(s.cost, 0))::numeric AS margin,
+            COALESCE(s.samples, 0)::int AS samples,
+            COALESCE(s.sample_cost, 0)::numeric AS sample_cost,
             s.first_order, s.last_order
      FROM leads l
      LEFT JOIN users owner ON owner.id = l.assigned_to
@@ -2495,13 +2528,16 @@ async function queryClients(req: Request, filters: ClientListFilters) {
               COUNT(*) AS orders,
               COUNT(*) FILTER (WHERE COALESCE(o.delivery_status, 'not_shipped') NOT IN ('delivered', 'returned')) AS open_orders,
               SUM(COALESCE(t.kg, 0)) AS kg,
-              SUM(o.order_value) AS revenue,
-              SUM(COALESCE(t.cost, 0)) AS cost,
+              SUM(o.order_value) FILTER (WHERE NOT COALESCE(t.is_sample, false)) AS revenue,
+              SUM(COALESCE(t.cost, 0)) FILTER (WHERE NOT COALESCE(t.is_sample, false)) AS cost,
+              COUNT(*) FILTER (WHERE t.is_sample) AS samples,
+              SUM(t.cost) FILTER (WHERE t.is_sample) AS sample_cost,
               MIN(o.order_date) AS first_order,
               MAX(o.order_date) AS last_order
        FROM orders o
        LEFT JOIN (
-         SELECT oi.order_id, SUM(oi.quantity_kg) AS kg, SUM(p.cost_price * oi.quantity_kg) AS cost
+         SELECT oi.order_id, SUM(oi.quantity_kg) AS kg, SUM(p.cost_price * oi.quantity_kg) AS cost,
+                BOOL_AND(oi.unit_price = 0) AS is_sample
          FROM order_items oi
          JOIN products p ON p.id = oi.product_id
          GROUP BY oi.order_id
@@ -2537,12 +2573,13 @@ app.get("/clients", requireAuth, blockDriver, async (req, res) => {
     (acc, r) => {
       acc.revenue += Number(r.revenue);
       acc.margin += Number(r.margin);
+      acc.sampleCost += Number(r.sample_cost);
       acc.orders += Number(r.orders);
       acc.open += Number(r.open_orders);
       if (Number(r.orders) > 0) acc.active += 1;
       return acc;
     },
-    { revenue: 0, margin: 0, orders: 0, open: 0, active: 0 }
+    { revenue: 0, margin: 0, sampleCost: 0, orders: 0, open: 0, active: 0 }
   );
 
   const tableRows = rows
@@ -2586,6 +2623,7 @@ app.get("/clients", requireAuth, blockDriver, async (req, res) => {
         <div class="card"><strong>${escapeHtml(totals.orders)}</strong><span>Orders</span></div>
         <div class="card"><strong>${escapeHtml(money(totals.revenue))}</strong><span>Revenue</span></div>
         <div class="card"><strong>${escapeHtml(money(totals.margin))}</strong><span>Margin</span></div>
+        <div class="card"><strong>${escapeHtml(money(totals.sampleCost))}</strong><span>Sample cost (not in margin)</span></div>
         <div class="card"><strong>${escapeHtml(totals.open)}</strong><span>Open deliveries</span></div>
       </section>
       <div class="toolbar">
@@ -2619,7 +2657,7 @@ app.get("/clients", requireAuth, blockDriver, async (req, res) => {
             : '<p class="empty">No clients found.</p>'
         }
       </div>
-      <p class="hint">Totals exclude cancelled orders. Cost and margin use each product's current cost price.</p>`,
+      <p class="hint">${MARGIN_HINT}</p>`,
       req
     )
   );
@@ -2628,7 +2666,7 @@ app.get("/clients", requireAuth, blockDriver, async (req, res) => {
 app.get("/export/clients", requireAuth, blockDriver, async (req, res) => {
   const result = await queryClients(req, req.query as ClientListFilters);
   const lines = [
-    csvRow(["Client ID", "Company", "Contact", "Phone", "Email", "Region", "Salesperson", "Orders", "Open deliveries", "Kg", "Revenue", "Cost", "Margin", "First order", "Last order"]),
+    csvRow(["Client ID", "Company", "Contact", "Phone", "Email", "Region", "Salesperson", "Orders", "Open deliveries", "Kg", "Revenue", "Cost", "Margin", "Samples", "Sample cost", "First order", "Last order"]),
     ...result.rows.map((r) =>
       csvRow([
         r.id,
@@ -2644,6 +2682,8 @@ app.get("/export/clients", requireAuth, blockDriver, async (req, res) => {
         Number(r.revenue).toFixed(2),
         Number(r.cost).toFixed(2),
         Number(r.margin).toFixed(2),
+        r.samples,
+        Number(r.sample_cost).toFixed(2),
         r.first_order ? localIso(new Date(r.first_order)) : "",
         r.last_order ? localIso(new Date(r.last_order)) : "",
       ])
@@ -2735,12 +2775,26 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
   const admin = isAdmin(req);
   const currentUserId = req.session.user!.id;
 
+  const isSampleOrder = (orderId: number) => {
+    const items = itemsByOrder.get(orderId) || [];
+    return items.length > 0 && items.every((i) => Number(i.unit_price) === 0);
+  };
   const counted = orders.filter((o) => o.status !== "cancelled");
+  const paidOrders = counted.filter((o) => !isSampleOrder(o.id));
+  const sampleOrders = counted.filter((o) => isSampleOrder(o.id));
+  let sampleCost = 0;
+  let sampleKg = 0;
+  for (const o of sampleOrders) {
+    for (const item of itemsByOrder.get(o.id) || []) {
+      sampleKg += Number(item.quantity_kg || 0);
+      sampleCost += Number(item.quantity_kg || 0) * Number(item.cost_price || 0);
+    }
+  }
   const productTotals = new Map<string, { kg: number; revenue: number; cost: number; orders: Set<number> }>();
   let revenue = 0;
   let cost = 0;
   let kg = 0;
-  for (const o of counted) {
+  for (const o of paidOrders) {
     revenue += Number(o.order_value || 0);
     for (const item of itemsByOrder.get(o.id) || []) {
       const itemKg = Number(item.quantity_kg || 0);
@@ -2848,7 +2902,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
               <td class="num">${escapeHtml(money(Number(i.unit_price)))}</td>
               <td class="num">${escapeHtml(money(lineAmount))}</td>
               <td class="num">${escapeHtml(money(lineCost))}</td>
-              <td class="num">${escapeHtml(money(lineAmount - lineCost))}</td>
+              <td class="num">${isSample ? "—" : escapeHtml(money(lineAmount - lineCost))}</td>
             </tr>`;
         })
         .join("");
@@ -2880,7 +2934,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
                   <table class="data-table compact">
                     <thead><tr><th>Product</th><th class="num">Kg</th><th class="num">Sachets</th><th class="num">Cartons</th><th class="num">Unit price</th><th class="num">Amount</th><th class="num">Cost</th><th class="num">Margin</th></tr></thead>
                     <tbody>${itemRows}</tbody>
-                    <tfoot><tr><td>Total</td><td class="num">${escapeHtml(qty(orderKg, 4))}</td><td></td><td></td><td></td><td class="num">${escapeHtml(money(orderValue))}</td><td class="num">${escapeHtml(money(orderCost))}</td><td class="num">${escapeHtml(money(orderValue - orderCost))}</td></tr></tfoot>
+                    <tfoot><tr><td>${isSample ? "Total (sample cost, not in margin)" : "Total"}</td><td class="num">${escapeHtml(qty(orderKg, 4))}</td><td></td><td></td><td></td><td class="num">${escapeHtml(money(orderValue))}</td><td class="num">${escapeHtml(money(orderCost))}</td><td class="num">${isSample ? "—" : escapeHtml(money(orderValue - orderCost))}</td></tr></tfoot>
                   </table>
                 </div>`
               : `<p class="muted">No product lines recorded. Order value: ${escapeHtml(money(orderValue))}</p>`
@@ -2916,10 +2970,15 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
         <p class="no-print"><a href="/leads/${client.id}/edit">Edit client</a> · <a href="/leads/${client.id}/notes">Comments</a></p>
       </section>
       <section class="stats client-stats">
-        <div class="card highlight"><strong>${escapeHtml(money(revenue))}</strong><span>Revenue (${escapeHtml(counted.length)} orders)</span></div>
+        <div class="card highlight"><strong>${escapeHtml(money(revenue))}</strong><span>Revenue (${escapeHtml(paidOrders.length)} paid order${paidOrders.length === 1 ? "" : "s"})</span></div>
         <div class="card"><strong>${escapeHtml(money(margin))}</strong><span>Margin${revenue > 0 ? ` (${escapeHtml(((margin / revenue) * 100).toFixed(1))}%)` : ""}</span></div>
-        <div class="card"><strong>${escapeHtml(qty(kg))} kg</strong><span>Total quantity</span></div>
-        <div class="card"><strong>${escapeHtml(money(counted.length ? revenue / counted.length : 0))}</strong><span>Average order</span></div>
+        <div class="card"><strong>${escapeHtml(qty(kg))} kg</strong><span>Sold</span></div>
+        <div class="card"><strong>${escapeHtml(money(paidOrders.length ? revenue / paidOrders.length : 0))}</strong><span>Average order</span></div>
+        ${
+          sampleOrders.length
+            ? `<div class="card"><strong>${escapeHtml(money(sampleCost))}</strong><span>Sample cost, not in margin (${escapeHtml(sampleOrders.length)} sample${sampleOrders.length === 1 ? "" : "s"}, ${escapeHtml(qty(sampleKg))} kg)</span></div>`
+            : ""
+        }
         <div class="card"><strong>${escapeHtml(openDeliveries)}</strong><span>Open deliveries</span></div>
         <div class="card"><strong>${escapeHtml(shortDate(lastOrder))}</strong><span>Last order${firstOrder ? ` · first ${escapeHtml(shortDate(firstOrder))}` : ""}</span></div>
       </section>
@@ -2947,7 +3006,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
         <h2>Transactions (${escapeHtml(orders.length)})</h2>
         ${orderCards || '<p class="empty">No orders for this client in the selected period.</p>'}
       </section>
-      <p class="hint">Totals exclude cancelled orders. Cost and margin use each product's current cost price.</p>`,
+      <p class="hint">${MARGIN_HINT}</p>`,
       req
     )
   );
@@ -2958,12 +3017,13 @@ app.get("/clients/:id/export", requireAuth, blockDriver, async (req, res) => {
   if (!history) return;
   const { client, orders, itemsByOrder } = history;
   const lines = [
-    csvRow(["Order ID", "Order date", "Status", "Delivery status", "Delivery date", "Product", "SKU", "Kg", "Sachets", "Cartons", "Unit price", "Amount", "Cost", "Margin", "Salesperson", "Driver", "Notes"]),
+    csvRow(["Order ID", "Order date", "Type", "Status", "Delivery status", "Delivery date", "Product", "SKU", "Kg", "Sachets", "Cartons", "Unit price", "Amount", "Cost", "Margin", "Salesperson", "Driver", "Notes"]),
   ];
   for (const o of orders) {
-    const base = [o.id, localIso(new Date(o.order_date)), o.status, o.delivery_status, o.delivery_date ? new Date(o.delivery_date).toISOString() : ""];
-    const tail = [o.owner_name, o.driver_name, o.notes];
     const items = itemsByOrder.get(o.id) || [];
+    const isSample = items.length > 0 && items.every((i) => Number(i.unit_price) === 0);
+    const base = [o.id, localIso(new Date(o.order_date)), isSample ? "Sample" : "Order", o.status, o.delivery_status, o.delivery_date ? new Date(o.delivery_date).toISOString() : ""];
+    const tail = [o.owner_name, o.driver_name, o.notes];
     if (!items.length) {
       lines.push(csvRow([...base, "", "", "", "", "", "", Number(o.order_value || 0).toFixed(2), "", "", ...tail]));
       continue;
@@ -2983,7 +3043,7 @@ app.get("/clients/:id/export", requireAuth, blockDriver, async (req, res) => {
           Number(i.unit_price || 0).toFixed(2),
           amount.toFixed(2),
           lineCost.toFixed(2),
-          (amount - lineCost).toFixed(2),
+          isSample ? "" : (amount - lineCost).toFixed(2),
           ...tail,
         ])
       );

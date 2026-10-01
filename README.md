@@ -68,39 +68,43 @@ A simple web app for tracking sales leads and orders. Built with Node.js, Expres
    - Email: `admin@example.com`
    - Password: `admin123`
 
-   Change the default password from **Users** after logging in, or use the **Forgot password?** link if SMTP is configured.
+   Change the default password from **Users** after logging in.
 
-## Password reset email
+## Password resets
 
-To send password-reset links by email, set these variables in `.env`:
+Email is not configured. When an admin clicks **Send reset link** on the **Users** page, the link is shown on screen to copy and share. Self-service "Forgot password?" links are only written to the logs (`npx wrangler tail` in production).
 
-```env
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=your-smtp-user
-SMTP_PASS=your-smtp-password
-SMTP_FROM=noreply@example.com
-PASSWORD_RESET_URL_BASE=http://localhost:3000
-```
+## Production deployment (Cloudflare + Mac mini)
 
-If SMTP is not configured, reset links are printed to the console so you can still test the flow locally.
-
-## Sharing on a network
-
-Once the app is running on a computer, other people on the same network can access it using the host computer's IP address:
+The app runs on Cloudflare Workers at https://ordermanagement.soobrayen.com. The PostgreSQL database stays on the Mac mini and is reached through Hyperdrive:
 
 ```
-http://192.168.x.x:3000
+Worker (placed near JNB) -> Hyperdrive "ordermanagement-db" -> Workers VPC service -> Tunnel "ordermanagement-db" -> Postgres 16 on 127.0.0.1:5432
+```
+
+- Database: `ordermanagement` (role `ordermanagement`), credentials in `.env`.
+- Tunnel: `~/.cloudflared/ordermanagement-db.yml`, run by the launchd agent `com.cloudflare.cloudflared.ordermanagement-db` (must use QUIC; it is separate from the shared `mac-server` tunnel).
+- Postgres has `ssl = on` with a self-signed certificate; Hyperdrive requires TLS.
+- Backups: `~/Backups/ordermanagement/backup.sh` runs daily at 02:30 (launchd agent `com.lincoln.ordermanagement-backup`) and keeps 30 days in `~/Backups/ordermanagement/dumps/`.
+
+Schema changes are not applied by the Worker. After changing `initDb` in `src/db.ts`, run on the Mac mini:
+
+```bash
+npm run migrate
+npm run deploy
 ```
 
 ## Project structure
 
 ```
 src/
+  app.ts         # Express routes and app logic
   db.ts          # PostgreSQL pool, schema, and types
   auth.ts        # Password hashing and login helpers
   views.ts       # HTML rendering helpers
-  server.ts      # Express routes and app logic
+  server.ts      # Local Node.js entry point (npm run dev)
+  worker.ts      # Cloudflare Workers entry point
+  migrate.ts     # Applies the schema (npm run migrate)
 public/
   style.css      # App styles
   app.js         # Small frontend helpers

@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ordermanagement",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Pages make several sequential queries; running near the Hyperdrive pool (JNB) is ~4x faster than at the MRU edge.
+  "placement": {
+    "region": "azure:southafricanorth"
+  },
+  "assets": {
+    "directory": "./public"
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "a150d5bafbad4f649dfd825fd5ab6740"
+    }
+  ],
+  "vars": {
+    "PASSWORD_RESET_URL_BASE": "https://ordermanagement.soobrayen.com"
+  },
+  "routes": [
+    {
+      "pattern": "ordermanagement.soobrayen.com",
+      "custom_domain": true
+    }
+  ],
+  "triggers": {
+    "crons": ["17 3 * * *"]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

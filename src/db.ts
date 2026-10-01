@@ -1,17 +1,67 @@
-import { Pool } from "pg";
-import bcrypt from "bcrypt";
-import dotenv from "dotenv";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Pool, PoolClient } from "pg";
+import bcrypt from "bcryptjs";
+import type { NextFunction, Request, Response } from "express";
 
-dotenv.config();
+// On Workers, sockets cannot be shared between requests, so each request gets its own pool.
+const requestScopedPool = new AsyncLocalStorage<Pool>();
+let sharedPool: Pool | undefined;
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL environment variable is required");
+interface PerRequestPoolConfig {
+  connectionString: () => string;
+  waitUntil: (promise: Promise<unknown>) => void;
+}
+let perRequestPoolConfig: PerRequestPoolConfig | undefined;
+
+function activePool(): Pool {
+  const scoped = requestScopedPool.getStore();
+  if (scoped) return scoped;
+  if (!sharedPool) {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      throw new Error("DATABASE_URL environment variable is required");
+    }
+    sharedPool = new Pool({ connectionString: databaseUrl });
+  }
+  return sharedPool;
 }
 
-export const pool = new Pool({
-  connectionString: databaseUrl,
-});
+export const pool = {
+  query: ((...args: unknown[]) =>
+    (activePool().query as (...queryArgs: unknown[]) => unknown)(...args)) as Pool["query"],
+  connect: (): Promise<PoolClient> => activePool().connect(),
+};
+
+export async function closeSharedPool(): Promise<void> {
+  await sharedPool?.end();
+  sharedPool = undefined;
+}
+
+export function usePerRequestPools(config: PerRequestPoolConfig): void {
+  perRequestPoolConfig = config;
+}
+
+export function requestPoolMiddleware(req: Request, res: Response, next: NextFunction): void {
+  if (!perRequestPoolConfig) {
+    next();
+    return;
+  }
+  const { connectionString, waitUntil } = perRequestPoolConfig;
+  const scoped = new Pool({ connectionString: connectionString(), max: 5 });
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    waitUntil(scoped.end().catch(() => undefined));
+  };
+  res.once("finish", end);
+  res.once("close", end);
+  requestScopedPool.run(scoped, next);
+}
+
+export async function pruneExpiredSessions(): Promise<void> {
+  await pool.query('DELETE FROM "session" WHERE expire < NOW()');
+}
 
 export async function initDb(): Promise<void> {
   const client = await pool.connect();
@@ -269,6 +319,18 @@ export async function initDb(): Promise<void> {
 
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_password_resets_token_hash ON password_resets(token_hash);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS "session" (
+        "sid" VARCHAR NOT NULL COLLATE "default" PRIMARY KEY,
+        "sess" JSON NOT NULL,
+        "expire" TIMESTAMP(6) NOT NULL
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
     `);
 
     // Drop legacy salespeople table if it exists

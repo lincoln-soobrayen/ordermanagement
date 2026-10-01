@@ -1,7 +1,6 @@
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { Request } from "express";
-import nodemailer from "nodemailer";
 import { pool, User } from "./db";
 
 export async function authenticateUser(
@@ -49,21 +48,6 @@ export function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function getSmtpConfig() {
-  return {
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || "587"),
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  };
-}
-
-function hasSmtpConfig(): boolean {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
-}
-
 export function buildPasswordResetUrl(token: string): string {
   const base = process.env.PASSWORD_RESET_URL_BASE || `http://localhost:${process.env.PORT || 3000}`;
   return `${base.replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(token)}`;
@@ -73,28 +57,7 @@ export async function sendPasswordResetEmail(
   user: Pick<User, "email" | "name">,
   resetUrl: string
 ): Promise<void> {
-  const appName = process.env.APP_NAME || "Leads & Orders";
-  const from = process.env.SMTP_FROM || `"${appName}" <noreply@example.com>`;
-  const subject = `Reset your ${appName} password`;
-  const html = `
-    <p>Hi ${user.name || user.email},</p>
-    <p>Click the link below to reset your password. This link expires in 1 hour.</p>
-    <p><a href="${resetUrl}">${resetUrl}</a></p>
-    <p>If you did not request this, you can ignore this email.</p>
-  `;
-
-  if (hasSmtpConfig()) {
-    const transporter = nodemailer.createTransport(getSmtpConfig());
-    await transporter.sendMail({
-      from,
-      to: user.email,
-      subject,
-      html,
-    });
-    console.log(`Password reset email sent to ${user.email}`);
-  } else {
-    console.log(`[No SMTP configured] Password reset link for ${user.email}: ${resetUrl}`);
-  }
+  console.log(`[Email not configured] Password reset link for ${user.email}: ${resetUrl}`);
 }
 
 export async function createPasswordResetToken(userId: number): Promise<string> {

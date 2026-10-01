@@ -26,6 +26,7 @@ function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean): string
     : [
         { href: "/dashboard", icon: "⊞", label: "Dashboard" },
         { href: "/leads", icon: "👤", label: "Leads" },
+        { href: "/clients", icon: "🏢", label: "Clients" },
         { href: "/orders", icon: "📦", label: "Orders" },
         { href: "/deliveries", icon: "🚚", label: "Deliveries" },
         { href: "/products", icon: "🛍", label: "Products" },

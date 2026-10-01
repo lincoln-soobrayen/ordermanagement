@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import type { Pool } from "pg";
-import { pool, requestPoolMiddleware, Lead, Order, OrderItem, Product, User } from "./db";
+import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, Lead, Order, OrderItem, Product, User } from "./db";
 import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
 
@@ -16,6 +16,15 @@ declare module "express-session" {
     flash?: { message: string; type: "success" | "error" };
     resetUserId?: number;
     resetToken?: string;
+  }
+}
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      followUpsDue?: number;
+    }
   }
 }
 
@@ -34,6 +43,25 @@ app.use(
     cookie: { maxAge: 24 * 60 * 60 * 1000 },
   })
 );
+
+app.use(async (req, _res, next) => {
+  if (req.method !== "GET" || !req.session.user || isDriver(req) || req.path.includes("export")) {
+    next();
+    return;
+  }
+  try {
+    const leadF = await leadFilter(req, "l");
+    const result = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM follow_ups f JOIN leads l ON l.id = f.lead_id
+       WHERE f.status = 'pending' AND f.due_date <= CURRENT_DATE${leadF.where}`,
+      leadF.params
+    );
+    req.followUpsDue = result.rows[0].n;
+  } catch (err) {
+    console.error("Follow-up count failed", err);
+  }
+  next();
+});
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (req.session.user) {
@@ -54,7 +82,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 function renderPage(title: string, body: string, req: Request): string {
   const f = flash(req);
   const wrappedBody = `${f.message ? alertHtml(f.message, f.type) : ""}${body}`;
-  return page(title, wrappedBody, req.session.user?.name, isAdmin(req), isDriver(req));
+  return page(title, wrappedBody, req.session.user?.name, isAdmin(req), isDriver(req), req.followUpsDue);
 }
 
 function requireDriverOnly(req: Request, res: Response, next: NextFunction): void {
@@ -120,6 +148,47 @@ async function canAccessDelivery(req: Request, orderId: number): Promise<boolean
     req.session.user!.id,
   ]);
   return result.rows.length > 0;
+}
+
+async function canAccessFollowUp(req: Request, followUpId: number): Promise<boolean> {
+  if (isDriver(req)) return false;
+  const result = await pool.query(
+    `SELECT l.assigned_to FROM follow_ups f JOIN leads l ON l.id = f.lead_id WHERE f.id = $1`,
+    [followUpId]
+  );
+  if (result.rows.length === 0) return false;
+  return isAdmin(req) || result.rows[0].assigned_to === req.session.user!.id;
+}
+
+// Follow-up bookkeeping must never block an order or delivery from being saved.
+async function scheduleDeliveryFollowUp(orderId: number, userId: number | undefined): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO follow_ups (lead_id, order_id, type, due_date, created_by)
+       SELECT o.lead_id, o.id,
+              CASE WHEN ${SAMPLE_ORDER_SQL} THEN 'sample_feedback' ELSE 'reorder' END,
+              CURRENT_DATE + $2::int, $3
+       FROM orders o
+       WHERE o.id = $1 AND o.lead_id IS NOT NULL AND o.delivery_status = 'delivered' AND o.status != 'cancelled'
+       ON CONFLICT DO NOTHING`,
+      [orderId, DEFAULT_FOLLOW_UP_DAYS, userId || null]
+    );
+  } catch (err) {
+    console.error("Could not schedule follow-up for order", orderId, err);
+  }
+}
+
+async function closeFollowUpsForNewOrder(leadId: number, userId: number | undefined): Promise<void> {
+  try {
+    await pool.query(
+      `UPDATE follow_ups
+       SET status = 'done', outcome = 'placed_order', completed_by = $2, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+       WHERE lead_id = $1 AND status IN ('pending', 'unreachable') AND type IN ('reorder', 'sample_feedback')`,
+      [leadId, userId || null]
+    );
+  } catch (err) {
+    console.error("Could not close follow-ups for lead", leadId, err);
+  }
 }
 
 interface OrderLineInput {
@@ -937,6 +1006,9 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
     }
     await client.query("COMMIT");
     setFlash(req, "Order created");
+    const newOrderId = orderResult.rows[0].id as number;
+    if (lead_id && !isSample) await closeFollowUpsForNewOrder(parseInt(lead_id, 10), req.session.user!.id);
+    if (delivery_status === "delivered") await scheduleDeliveryFollowUp(newOrderId, req.session.user!.id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -1051,6 +1123,7 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     }
     await client.query("COMMIT");
     setFlash(req, "Order updated");
+    if (delivery_status === "delivered") await scheduleDeliveryFollowUp(parseInt(req.params.id, 10), req.session.user!.id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -1070,6 +1143,7 @@ app.post("/orders/:id/deliver", requireAuth, async (req, res) => {
     "UPDATE orders SET delivery_status = 'delivered', status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
     [orderId]
   );
+  await scheduleDeliveryFollowUp(orderId, req.session.user!.id);
   setFlash(req, "Order marked as delivered");
   res.redirect(isDriver(req) ? "/deliveries" : "/orders");
 });
@@ -2681,6 +2755,55 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
       productTotals.set(item.product_name, totals);
     }
   }
+  const followUpsResult = await pool.query(
+    `SELECT f.id, f.type, f.status, f.attempts, f.notes, to_char(f.due_date, 'YYYY-MM-DD') AS due_iso, (f.due_date - CURRENT_DATE) AS days_until,
+            to_char(CURRENT_DATE + $2::int, 'YYYY-MM-DD') AS default_iso
+     FROM follow_ups f
+     WHERE f.lead_id = $1 AND f.status IN ('pending', 'unreachable')
+     ORDER BY f.due_date ASC`,
+    [client.id, DEFAULT_FOLLOW_UP_DAYS]
+  );
+  const openFollowUps = followUpsResult.rows;
+  const defaultFollowUpIso =
+    openFollowUps[0]?.default_iso ||
+    (await pool.query("SELECT to_char(CURRENT_DATE + $1::int, 'YYYY-MM-DD') AS d", [DEFAULT_FOLLOW_UP_DAYS])).rows[0].d;
+  const followUpRows = openFollowUps
+    .map(
+      (f) => `
+        <tr>
+          <td>${escapeHtml(followUpTypeLabel(f.type))}</td>
+          <td>${escapeHtml(isoDateLabel(f.due_iso))}</td>
+          <td>${
+            f.status === "pending"
+              ? `<span class="status ${Number(f.days_until) < 0 ? "status-overdue" : Number(f.days_until) === 0 ? "status-due" : "status-upcoming"}">${escapeHtml(dueLabel(Number(f.days_until)))}</span>`
+              : `<span class="status status-unreachable">Unreachable</span>`
+          }${f.attempts > 0 ? ` <span class="muted">No answer ×${escapeHtml(f.attempts)}</span>` : ""}</td>
+          <td>${escapeHtml(f.notes || "")}</td>
+        </tr>`
+    )
+    .join("");
+  const followUpSection = `
+    <section class="no-print">
+      <div class="page-title-row">
+        <h2>Follow-ups</h2>
+        <a href="/follow-ups?q=${encodeURIComponent(client.phone || client.company || client.name)}&view=${openFollowUps.some((f) => f.status === "pending" && Number(f.days_until) <= 0) ? "due" : "upcoming"}" class="button small secondary">Open in Follow-ups</a>
+      </div>
+      ${
+        followUpRows
+          ? `<div class="table-wrap"><table class="data-table compact">
+              <thead><tr><th>Type</th><th>Call on</th><th>Status</th><th>Note</th></tr></thead>
+              <tbody>${followUpRows}</tbody>
+            </table></div>`
+          : '<p class="muted">No follow-up scheduled.</p>'
+      }
+      <form method="post" action="/clients/${client.id}/follow-ups" class="filters follow-up-add">
+        <select name="type">${optionsHtml(followUpTypes, "reorder")}</select>
+        <input type="date" name="due_date" value="${escapeHtml(defaultFollowUpIso)}" required aria-label="Call on">
+        <input type="text" name="notes" placeholder="Reason for the call (optional)">
+        <button type="submit">+ Add follow-up</button>
+      </form>
+    </section>`;
+
   const margin = revenue - cost;
   const openDeliveries = counted.filter((o) => !["delivered", "returned"].includes(o.delivery_status || "not_shipped")).length;
   const lastOrder = counted[0]?.order_date;
@@ -2805,6 +2928,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
           <button type="submit">Update</button>
         </form>
       </div>
+      ${followUpSection}
       ${
         productRows
           ? `<section>
@@ -2868,6 +2992,490 @@ app.get("/clients/:id/export", requireAuth, blockDriver, async (req, res) => {
   res.setHeader("Content-Type", "text/csv");
   res.setHeader("Content-Disposition", `attachment; filename=${fileName}-transactions.csv`);
   res.send(lines.join("\n"));
+});
+
+const followUpTypes = [
+  { value: "sample_feedback", label: "Sample feedback" },
+  { value: "reorder", label: "Next order" },
+  { value: "other", label: "Other" },
+];
+
+const followUpOutcomes: Record<string, { label: string; sampleOnly?: boolean }> = {
+  no_answer: { label: "No answer" },
+  call_back: { label: "Not ready yet / call back later" },
+  placed_order: { label: "Placed an order" },
+  liked_sample: { label: "Liked the sample", sampleOnly: true },
+  disliked_sample: { label: "Didn't like the sample", sampleOnly: true },
+  not_interested: { label: "Not interested" },
+};
+
+const followUpViews = ["due", "upcoming", "unreachable", "done"] as const;
+type FollowUpView = (typeof followUpViews)[number];
+
+function followUpTypeLabel(type: string): string {
+  return followUpTypes.find((t) => t.value === type)?.label || labelize(type);
+}
+
+function followUpOutcomeLabel(outcome: string | null | undefined): string {
+  if (!outcome) return "—";
+  return followUpOutcomes[outcome]?.label || labelize(outcome);
+}
+
+function parseIsoDate(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  return isNaN(new Date(`${value}T00:00:00Z`).getTime()) ? null : value;
+}
+
+function isoDateLabel(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  return new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, {
+    timeZone: "UTC",
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function dueLabel(daysUntil: number): string {
+  if (daysUntil < 0) return `Overdue ${-daysUntil} day${daysUntil === -1 ? "" : "s"}`;
+  if (daysUntil === 0) return "Due today";
+  if (daysUntil === 1) return "Tomorrow";
+  return `In ${daysUntil} days`;
+}
+
+function whatsappNumber(phone: string | null | undefined): string | null {
+  let digits = (phone || "").replace(/\D/g, "");
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.length === 8) digits = `230${digits}`;
+  return digits.length >= 10 ? digits : null;
+}
+
+function safeReturnTo(value: unknown, fallback = "/follow-ups"): string {
+  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") ? value : fallback;
+}
+
+interface FollowUpFilters {
+  view?: string;
+  type?: string;
+  owner?: string;
+  q?: string;
+}
+
+async function followUpBaseWhere(req: Request, filters: FollowUpFilters) {
+  const leadF = await leadFilter(req, "l");
+  const params: (string | number | undefined)[] = [...leadF.params];
+  let where = `WHERE 1=1${leadF.where}`;
+  if (filters.type && followUpTypes.some((t) => t.value === filters.type)) {
+    params.push(filters.type);
+    where += ` AND f.type = $${params.length}`;
+  }
+  const ownerId = parseInt(filters.owner || "", 10);
+  if (ownerId && isAdmin(req)) {
+    params.push(ownerId);
+    where += ` AND l.assigned_to = $${params.length}`;
+  }
+  if (filters.q) {
+    params.push(`%${filters.q}%`);
+    const p = `$${params.length}`;
+    where += ` AND (l.name ILIKE ${p} OR l.company ILIKE ${p} OR l.phone ILIKE ${p})`;
+  }
+  return { where, params };
+}
+
+const followUpViewSql: Record<FollowUpView, { where: string; orderBy: string }> = {
+  due: { where: "f.status = 'pending' AND f.due_date <= CURRENT_DATE", orderBy: "f.due_date ASC, f.id ASC" },
+  upcoming: { where: "f.status = 'pending' AND f.due_date > CURRENT_DATE", orderBy: "f.due_date ASC, f.id ASC" },
+  unreachable: { where: "f.status = 'unreachable'", orderBy: "f.updated_at DESC" },
+  done: { where: "f.status IN ('done', 'cancelled')", orderBy: "COALESCE(f.completed_at, f.updated_at) DESC" },
+};
+
+function followUpCard(f: any, admin: boolean, returnTo: string): string {
+  const daysUntil = Number(f.days_until);
+  const pending = f.status === "pending";
+  const overdue = pending && daysUntil < 0;
+  const isSampleType = f.type === "sample_feedback";
+  const wa = whatsappNumber(f.phone);
+  const outcomeOptions = Object.entries(followUpOutcomes)
+    .filter(([, o]) => !o.sampleOnly || isSampleType)
+    .map(([value, o]) => ({ value, label: o.label }));
+
+  const orderContext = f.order_id
+    ? `<p><strong>${isSampleType ? "Sample" : "Order"} #${escapeHtml(f.order_id)}</strong>${
+        f.order_date ? ` · ordered ${escapeHtml(shortDate(f.order_date))}` : ""
+      }${f.order_summary ? ` · ${escapeHtml(f.order_summary)}` : ""}${
+        !isSampleType && Number(f.order_value) > 0 ? ` · ${escapeHtml(money(Number(f.order_value)))}` : ""
+      }</p>`
+    : "";
+  const avgGap = f.avg_gap !== null && f.avg_gap !== undefined ? Math.round(Number(f.avg_gap)) : null;
+  const rhythm =
+    Number(f.order_count) > 0
+      ? `<p class="muted">${escapeHtml(f.order_count)} paid order${Number(f.order_count) === 1 ? "" : "s"}${
+          avgGap ? ` · usually orders every ~${escapeHtml(avgGap)} days` : ""
+        } · last order ${escapeHtml(shortDate(f.last_order))}</p>`
+      : `<p class="muted">No paid orders yet</p>`;
+
+  let actions = "";
+  if (pending) {
+    actions = `
+      <form method="post" action="/follow-ups/${f.id}/reschedule" class="follow-up-reschedule">
+        <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
+        <span class="muted">Move to:</span>
+        <button type="submit" name="days" value="1" class="button small secondary">+1 day</button>
+        <button type="submit" name="days" value="3" class="button small secondary">+3 days</button>
+        <button type="submit" name="days" value="7" class="button small secondary">+1 week</button>
+        <input type="date" name="due_date" value="${escapeHtml(f.due_iso)}" aria-label="Follow-up date">
+        <button type="submit" class="button small secondary">Set date</button>
+      </form>
+      <details class="follow-up-log">
+        <summary class="button small">Log call</summary>
+        <form method="post" action="/follow-ups/${f.id}/log" class="form-grid">
+          <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
+          <label>Outcome
+            <select name="outcome" required>${optionsHtml([{ value: "", label: "Choose..." }, ...outcomeOptions], "")}</select>
+          </label>
+          <label>Next call date <span class="muted">(optional)</span>
+            <input type="date" name="next_date">
+          </label>
+          <label class="full">Note<textarea name="note" rows="2" placeholder="What did they say?"></textarea></label>
+          <p class="hint full">No answer: tries again tomorrow, and after ${MAX_NO_ANSWER_ATTEMPTS} tries the follow-up is marked unreachable. Call back / liked the sample: next call in ${DEFAULT_FOLLOW_UP_DAYS} days unless you pick a date. Placed an order: opens a new order for this client.</p>
+          <div class="actions full"><button type="submit">Save call</button></div>
+        </form>
+      </details>
+      <form method="post" action="/follow-ups/${f.id}/cancel" class="inline-form" onsubmit="return confirm('Cancel this follow-up?');">
+        <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
+        <button type="submit" class="button small danger">Cancel</button>
+      </form>`;
+  } else {
+    actions = `
+      <form method="post" action="/follow-ups/${f.id}/reopen" class="follow-up-reschedule">
+        <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
+        <input type="date" name="due_date" aria-label="New follow-up date">
+        <button type="submit" class="button small secondary">Reopen</button>
+      </form>`;
+  }
+
+  const statusBadge = pending
+    ? `<span class="status ${overdue ? "status-overdue" : daysUntil === 0 ? "status-due" : "status-upcoming"}">${escapeHtml(dueLabel(daysUntil))}</span>`
+    : `<span class="status status-${escapeHtml(f.status)}">${escapeHtml(labelize(f.status))}</span>`;
+
+  return `
+    <article class="follow-up-card${overdue ? " is-overdue" : ""}">
+      <header class="client-order-header">
+        <div>
+          <h3><a href="/clients/${f.lead_id}">${escapeHtml(f.company || f.name)}</a></h3>
+          <span class="muted">${escapeHtml(f.company ? f.name : "")}${f.company && f.region ? " · " : ""}${escapeHtml(f.region ? labelize(f.region) : "")}${
+            admin && f.owner_name ? ` · ${escapeHtml(f.owner_name)}` : ""
+          }</span>
+        </div>
+        <div class="client-order-badges">
+          <span class="badge">${escapeHtml(followUpTypeLabel(f.type))}</span>
+          ${statusBadge}
+          ${f.attempts > 0 ? `<span class="badge">No answer ×${escapeHtml(f.attempts)}</span>` : ""}
+        </div>
+      </header>
+      <div class="follow-up-body">
+        <p class="follow-up-contact">
+          ${f.phone ? `<a href="tel:${escapeHtml(f.phone.replace(/[^\d+]/g, ""))}" class="button small">📞 ${escapeHtml(f.phone)}</a>` : '<span class="muted">No phone number</span>'}
+          ${wa ? `<a href="https://wa.me/${wa}" target="_blank" rel="noopener noreferrer" class="button small secondary">WhatsApp</a>` : ""}
+          <span class="muted">${pending ? `Call on ${escapeHtml(isoDateLabel(f.due_iso))}` : ""}</span>
+        </p>
+        ${orderContext}
+        ${rhythm}
+        ${f.notes ? `<p><strong>Note:</strong> ${escapeHtml(f.notes)}</p>` : ""}
+        ${
+          !pending
+            ? `<p class="muted">${f.outcome ? `Outcome: ${escapeHtml(followUpOutcomeLabel(f.outcome))}` : ""}${
+                f.completed_at ? ` · ${escapeHtml(shortDate(f.completed_at))}` : ""
+              }${f.completed_by_name ? ` by ${escapeHtml(f.completed_by_name)}` : ""}</p>`
+            : ""
+        }
+        ${
+          f.last_comment
+            ? `<p class="follow-up-last-comment"><span class="muted">Last comment (${escapeHtml(shortDate(f.last_comment_at))}):</span> ${escapeHtml(f.last_comment)} <a href="/leads/${f.lead_id}/notes" class="no-print">All comments</a></p>`
+            : ""
+        }
+      </div>
+      <div class="follow-up-actions no-print">${actions}</div>
+    </article>`;
+}
+
+app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
+  const filters = req.query as FollowUpFilters;
+  const view: FollowUpView = followUpViews.includes(filters.view as FollowUpView) ? (filters.view as FollowUpView) : "due";
+  const admin = isAdmin(req);
+  const base = await followUpBaseWhere(req, filters);
+
+  const countsResult = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE ${followUpViewSql.due.where})::int AS due,
+       COUNT(*) FILTER (WHERE ${followUpViewSql.upcoming.where})::int AS upcoming,
+       COUNT(*) FILTER (WHERE ${followUpViewSql.unreachable.where})::int AS unreachable,
+       COUNT(*) FILTER (WHERE f.status = 'pending' AND f.due_date < CURRENT_DATE)::int AS overdue
+     FROM follow_ups f JOIN leads l ON l.id = f.lead_id
+     ${base.where}`,
+    base.params
+  );
+  const counts = countsResult.rows[0];
+
+  const viewSql = followUpViewSql[view];
+  const result = await pool.query(
+    `SELECT f.*, to_char(f.due_date, 'YYYY-MM-DD') AS due_iso, (f.due_date - CURRENT_DATE) AS days_until,
+            l.name, l.company, l.phone, l.region, owner.name AS owner_name, completer.name AS completed_by_name,
+            o.order_date, o.order_value,
+            (SELECT string_agg(p.name || ' ' || trim(to_char(oi.quantity_kg, 'FM999999990.###')) || ' kg', ', ' ORDER BY oi.id)
+               FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = f.order_id) AS order_summary,
+            stats.order_count, stats.last_order, stats.avg_gap,
+            lc.comment AS last_comment, lc.created_at AS last_comment_at
+     FROM follow_ups f
+     JOIN leads l ON l.id = f.lead_id
+     LEFT JOIN users owner ON owner.id = l.assigned_to
+     LEFT JOIN users completer ON completer.id = f.completed_by
+     LEFT JOIN orders o ON o.id = f.order_id
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS order_count, MAX(o.order_date) AS last_order,
+              CASE WHEN COUNT(*) > 1 THEN (MAX(o.order_date) - MIN(o.order_date))::numeric / (COUNT(*) - 1) END AS avg_gap
+       FROM orders o
+       WHERE o.lead_id = l.id AND o.status != 'cancelled' AND NOT ${SAMPLE_ORDER_SQL}
+     ) stats ON true
+     LEFT JOIN LATERAL (
+       SELECT comment, created_at FROM lead_comments WHERE lead_id = l.id ORDER BY created_at DESC LIMIT 1
+     ) lc ON true
+     ${base.where} AND ${viewSql.where}
+     ORDER BY ${viewSql.orderBy}
+     LIMIT 200`,
+    base.params
+  );
+
+  const owners = admin
+    ? (await pool.query("SELECT id, name FROM users WHERE role != 'driver' ORDER BY name")).rows
+    : [];
+  const returnTo = req.originalUrl;
+  const tabQuery = (v: FollowUpView) => {
+    const q = new URLSearchParams();
+    q.set("view", v);
+    if (filters.type) q.set("type", filters.type);
+    if (filters.owner) q.set("owner", filters.owner);
+    if (filters.q) q.set("q", filters.q);
+    return `/follow-ups?${q.toString()}`;
+  };
+  const tabs: { view: FollowUpView; label: string; count?: number }[] = [
+    { view: "due", label: "To call now", count: counts.due },
+    { view: "upcoming", label: "Upcoming", count: counts.upcoming },
+    { view: "unreachable", label: "Unreachable", count: counts.unreachable },
+    { view: "done", label: "Done" },
+  ];
+  const emptyText: Record<FollowUpView, string> = {
+    due: "Nothing to call today. 🎉",
+    upcoming: "No upcoming follow-ups.",
+    unreachable: "No unreachable clients.",
+    done: "No completed follow-ups yet.",
+  };
+
+  res.send(
+    renderPage(
+      "Follow-ups",
+      `
+      <div class="page-title-row">
+        <h1>📞 Follow-ups</h1>
+      </div>
+      <section class="stats">
+        <div class="card highlight"><strong>${escapeHtml(counts.due)}</strong><span>To call now</span></div>
+        <div class="card"><strong>${escapeHtml(counts.overdue)}</strong><span>Overdue</span></div>
+        <div class="card"><strong>${escapeHtml(counts.upcoming)}</strong><span>Upcoming</span></div>
+        <div class="card"><strong>${escapeHtml(counts.unreachable)}</strong><span>Unreachable</span></div>
+      </section>
+      <nav class="tabs">
+        ${tabs
+          .map(
+            (t) =>
+              `<a href="${escapeHtml(tabQuery(t.view))}" class="tab${t.view === view ? " active" : ""}">${escapeHtml(t.label)}${
+                t.count !== undefined ? ` <span class="tab-count">${escapeHtml(t.count)}</span>` : ""
+              }</a>`
+          )
+          .join("")}
+      </nav>
+      <div class="toolbar">
+        <form method="get" class="filters">
+          <input type="hidden" name="view" value="${escapeHtml(view)}">
+          <input type="search" name="q" value="${escapeHtml(filters.q || "")}" placeholder="Search client or phone...">
+          <select name="type">${optionsHtml([{ value: "", label: "All types" }, ...followUpTypes], filters.type || "")}</select>
+          ${
+            admin
+              ? `<select name="owner">${optionsHtml(
+                  [{ value: "", label: "All salespeople" }, ...owners.map((u) => ({ value: String(u.id), label: u.name }))],
+                  filters.owner || ""
+                )}</select>`
+              : ""
+          }
+          <button type="submit">Filter</button>
+        </form>
+      </div>
+      ${
+        result.rows.length
+          ? result.rows.map((f) => followUpCard(f, admin, returnTo)).join("")
+          : `<p class="empty">${escapeHtml(emptyText[view])}</p>`
+      }
+      <p class="hint">Follow-ups are created automatically ${DEFAULT_FOLLOW_UP_DAYS} days after an order is delivered: samples get a "Sample feedback" call, other orders a "Next order" call. You can add one by hand from a client's page.</p>`,
+      req
+    )
+  );
+});
+
+async function loadFollowUpForAction(req: Request, res: Response) {
+  const id = parseInt(req.params.id, 10);
+  if (!id || !(await canAccessFollowUp(req, id))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return null;
+  }
+  const result = await pool.query("SELECT * FROM follow_ups WHERE id = $1", [id]);
+  return result.rows[0] as { id: number; lead_id: number; order_id: number | null; type: string; status: string; attempts: number };
+}
+
+app.post("/follow-ups/:id/reschedule", requireAuth, blockDriver, async (req, res) => {
+  const followUp = await loadFollowUpForAction(req, res);
+  if (!followUp) return;
+  const returnTo = safeReturnTo(req.body.return_to);
+  const days = parseInt(req.body.days, 10);
+  const date = parseIsoDate(req.body.due_date);
+  let result;
+  if (days >= 1 && days <= 365) {
+    result = await pool.query(
+      `UPDATE follow_ups SET due_date = GREATEST(due_date, CURRENT_DATE) + $2::int, status = 'pending', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+      [followUp.id, days]
+    );
+  } else if (date) {
+    result = await pool.query(
+      `UPDATE follow_ups SET due_date = $2::date, status = 'pending', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+      [followUp.id, date]
+    );
+  } else {
+    setFlash(req, "Pick a date for the follow-up", "error");
+    res.redirect(returnTo);
+    return;
+  }
+  setFlash(req, `Follow-up moved to ${isoDateLabel(result.rows[0].due_iso)}`);
+  res.redirect(returnTo);
+});
+
+app.post("/follow-ups/:id/log", requireAuth, blockDriver, async (req, res) => {
+  const followUp = await loadFollowUpForAction(req, res);
+  if (!followUp) return;
+  const returnTo = safeReturnTo(req.body.return_to);
+  const outcome = String(req.body.outcome || "");
+  if (!followUpOutcomes[outcome]) {
+    setFlash(req, "Choose the outcome of the call", "error");
+    res.redirect(returnTo);
+    return;
+  }
+  const note = String(req.body.note || "").trim();
+  const nextDate = parseIsoDate(req.body.next_date);
+  const userId = req.session.user!.id;
+  let message: string;
+
+  if (outcome === "no_answer") {
+    const attempts = followUp.attempts + 1;
+    if (attempts >= MAX_NO_ANSWER_ATTEMPTS && !nextDate) {
+      await pool.query(
+        `UPDATE follow_ups SET attempts = $2, outcome = 'no_answer', status = 'unreachable', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [followUp.id, attempts]
+      );
+      message = `No answer ${attempts} times. Moved to Unreachable.`;
+    } else {
+      const r = await pool.query(
+        `UPDATE follow_ups SET attempts = $2, outcome = 'no_answer', due_date = COALESCE($3::date, CURRENT_DATE + 1), updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+        [followUp.id, attempts, nextDate]
+      );
+      message = `No answer (try ${attempts} of ${MAX_NO_ANSWER_ATTEMPTS}). Next try ${isoDateLabel(r.rows[0].due_iso)}.`;
+    }
+  } else if (outcome === "call_back") {
+    const r = await pool.query(
+      `UPDATE follow_ups SET attempts = 0, outcome = 'call_back', due_date = COALESCE($2::date, CURRENT_DATE + $3::int), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+      [followUp.id, nextDate, DEFAULT_FOLLOW_UP_DAYS]
+    );
+    message = `Next call ${isoDateLabel(r.rows[0].due_iso)}.`;
+  } else {
+    await pool.query(
+      `UPDATE follow_ups SET status = 'done', outcome = $2, completed_by = $3, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [followUp.id, outcome, userId]
+    );
+    message = `Call saved: ${followUpOutcomeLabel(outcome)}.`;
+    const nextFollowUpDate = outcome === "liked_sample" ? nextDate || "default" : outcome === "placed_order" ? null : nextDate;
+    if (nextFollowUpDate) {
+      const r = await pool.query(
+        `INSERT INTO follow_ups (lead_id, type, due_date, notes, created_by)
+         VALUES ($1, 'reorder', COALESCE($2::date, CURRENT_DATE + $3::int), $4, $5)
+         RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+        [
+          followUp.lead_id,
+          nextFollowUpDate === "default" ? null : nextFollowUpDate,
+          DEFAULT_FOLLOW_UP_DAYS,
+          `After call: ${followUpOutcomeLabel(outcome)}`,
+          userId,
+        ]
+      );
+      message += ` Next order call ${isoDateLabel(r.rows[0].due_iso)}.`;
+    }
+  }
+
+  await pool.query("INSERT INTO lead_comments (lead_id, user_id, comment) VALUES ($1, $2, $3)", [
+    followUp.lead_id,
+    userId,
+    `Follow-up call (${followUpTypeLabel(followUp.type)}): ${followUpOutcomeLabel(outcome)}${note ? `. ${note}` : ""}`,
+  ]);
+  await pool.query("UPDATE leads SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", [followUp.lead_id]);
+
+  setFlash(req, message);
+  res.redirect(outcome === "placed_order" ? `/orders/new?lead_id=${followUp.lead_id}` : returnTo);
+});
+
+app.post("/follow-ups/:id/cancel", requireAuth, blockDriver, async (req, res) => {
+  const followUp = await loadFollowUpForAction(req, res);
+  if (!followUp) return;
+  await pool.query(
+    `UPDATE follow_ups SET status = 'cancelled', completed_by = $2, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [followUp.id, req.session.user!.id]
+  );
+  setFlash(req, "Follow-up cancelled");
+  res.redirect(safeReturnTo(req.body.return_to));
+});
+
+app.post("/follow-ups/:id/reopen", requireAuth, blockDriver, async (req, res) => {
+  const followUp = await loadFollowUpForAction(req, res);
+  if (!followUp) return;
+  const date = parseIsoDate(req.body.due_date);
+  const r = await pool.query(
+    `UPDATE follow_ups
+     SET status = 'pending', attempts = 0, completed_by = NULL, completed_at = NULL,
+         due_date = COALESCE($2::date, GREATEST(due_date, CURRENT_DATE)), updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+    [followUp.id, date]
+  );
+  setFlash(req, `Follow-up reopened for ${isoDateLabel(r.rows[0].due_iso)}`);
+  res.redirect(safeReturnTo(req.body.return_to));
+});
+
+app.post("/clients/:id/follow-ups", requireAuth, blockDriver, async (req, res) => {
+  const leadId = parseInt(req.params.id, 10);
+  if (!leadId || !(await canAccessLead(req, leadId))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  const type = followUpTypes.some((t) => t.value === req.body.type) ? req.body.type : "other";
+  const date = parseIsoDate(req.body.due_date);
+  const notes = String(req.body.notes || "").trim() || null;
+  const r = await pool.query(
+    `INSERT INTO follow_ups (lead_id, type, due_date, notes, created_by)
+     VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE + $4::int), $5, $6)
+     RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+    [leadId, type, date, DEFAULT_FOLLOW_UP_DAYS, notes, req.session.user!.id]
+  );
+  setFlash(req, `Follow-up added for ${isoDateLabel(r.rows[0].due_iso)}`);
+  res.redirect(safeReturnTo(req.body.return_to, `/clients/${leadId}`));
 });
 
 function csvRow(cells: (string | number | null)[]): string {

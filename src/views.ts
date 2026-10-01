@@ -1,4 +1,4 @@
-export function page(title: string, body: string, userName?: string, isAdmin: boolean = false, isDriver: boolean = false): string {
+export function page(title: string, body: string, userName?: string, isAdmin: boolean = false, isDriver: boolean = false, followUpsDue?: number): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8,7 +8,7 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  ${userName ? sideMenu(userName, isAdmin, isDriver) : ""}
+  ${userName ? sideMenu(userName, isAdmin, isDriver, followUpsDue) : ""}
   <div class="app-shell ${userName ? "with-sidebar" : ""}">
     ${userName ? "" : `<header class="site-header"><div class="container"><a href="/" class="logo">Leads & Orders</a></div></header>`}
     <main class="main-content">
@@ -20,23 +20,25 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
 </html>`;
 }
 
-function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean): string {
-  const baseItems = isDriver
+function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followUpsDue?: number): string {
+  const baseItems: { href: string; icon: string; label: string; badge?: number }[] = isDriver
     ? [{ href: "/deliveries", icon: "🚚", label: "Deliveries" }]
     : [
         { href: "/dashboard", icon: "⊞", label: "Dashboard" },
         { href: "/leads", icon: "👤", label: "Leads" },
         { href: "/clients", icon: "🏢", label: "Clients" },
+        { href: "/follow-ups", icon: "📞", label: "Follow-ups", badge: followUpsDue },
         { href: "/orders", icon: "📦", label: "Orders" },
         { href: "/deliveries", icon: "🚚", label: "Deliveries" },
         { href: "/products", icon: "🛍", label: "Products" },
         ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
       ];
 
-  const renderItem = (i: { href: string; icon: string; label: string }) => `
+  const renderItem = (i: { href: string; icon: string; label: string; badge?: number }) => `
     <a href="${i.href}" class="sidebar-link" data-match="${i.href}">
       <span class="sidebar-icon">${i.icon}</span>
       <span class="sidebar-label">${escapeHtml(i.label)}</span>
+      ${i.badge ? `<span class="sidebar-badge" title="${i.badge} due today or overdue">${i.badge}</span>` : ""}
     </a>
   `;
 

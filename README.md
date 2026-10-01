@@ -8,6 +8,8 @@ A simple web app for tracking sales leads and orders. Built with Node.js, Expres
 - Dashboard with pipeline value, order value, and status breakdowns
 - Leads management: create, edit, delete, search, filter by status
 - Orders management: create, edit, delete, link to a lead, search, filter by status
+- Clients: every client with their full order history, products bought, and margin
+- Follow-ups: call list created automatically 3 days after each delivery (sample feedback or next order), with no-answer retries and editable call dates
 - CSV export for leads and orders
 - Simple reports: conversion funnel and monthly revenue
 

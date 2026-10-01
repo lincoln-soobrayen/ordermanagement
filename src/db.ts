@@ -59,6 +59,13 @@ export function requestPoolMiddleware(req: Request, res: Response, next: NextFun
   requestScopedPool.run(scoped, next);
 }
 
+export const DEFAULT_FOLLOW_UP_DAYS = 3;
+export const MAX_NO_ANSWER_ATTEMPTS = 3;
+
+// An order is a sample when it has product lines and every line is priced at 0.
+export const SAMPLE_ORDER_SQL = `(EXISTS (SELECT 1 FROM order_items si WHERE si.order_id = o.id)
+  AND NOT EXISTS (SELECT 1 FROM order_items si WHERE si.order_id = o.id AND si.unit_price <> 0))`;
+
 export async function pruneExpiredSessions(): Promise<void> {
   await pool.query('DELETE FROM "session" WHERE expire < NOW()');
 }
@@ -332,6 +339,58 @@ export async function initDb(): Promise<void> {
     await client.query(`
       CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS follow_ups (
+        id SERIAL PRIMARY KEY,
+        lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+        order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+        type VARCHAR(30) NOT NULL DEFAULT 'other',
+        due_date DATE NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        outcome VARCHAR(30),
+        notes TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        completed_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT valid_follow_up_type CHECK (type IN ('sample_feedback', 'reorder', 'other')),
+        CONSTRAINT valid_follow_up_status CHECK (status IN ('pending', 'done', 'unreachable', 'cancelled'))
+      )
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_ups_order_id ON follow_ups(order_id) WHERE order_id IS NOT NULL;
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_follow_ups_status_due ON follow_ups(status, due_date);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_follow_ups_lead_id ON follow_ups(lead_id);
+    `);
+
+    // One-time backfill: delivered orders that are still the client's latest order get a follow-up
+    const followUpsExist = await client.query("SELECT 1 FROM follow_ups LIMIT 1");
+    if (followUpsExist.rows.length === 0) {
+      await client.query(`
+        INSERT INTO follow_ups (lead_id, order_id, type, due_date)
+        SELECT o.lead_id, o.id,
+               CASE WHEN ${SAMPLE_ORDER_SQL} THEN 'sample_feedback' ELSE 'reorder' END,
+               o.updated_at::date + ${DEFAULT_FOLLOW_UP_DAYS}
+        FROM orders o
+        WHERE o.lead_id IS NOT NULL
+          AND o.delivery_status = 'delivered'
+          AND o.status != 'cancelled'
+          AND NOT EXISTS (
+            SELECT 1 FROM orders later
+            WHERE later.lead_id = o.lead_id AND later.id != o.id AND later.status != 'cancelled'
+              AND (later.order_date > o.order_date OR (later.order_date = o.order_date AND later.id > o.id))
+          )
+        ON CONFLICT DO NOTHING
+      `);
+    }
 
     // Drop legacy salespeople table if it exists
     await client.query(`

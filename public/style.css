@@ -1103,6 +1103,21 @@ section {
   color: #991b1b;
 }
 
+.badge-danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.card.card-danger {
+  display: block;
+  border-left: 5px solid var(--danger);
+  text-decoration: none;
+}
+
+.card.card-danger strong {
+  color: var(--danger);
+}
+
 .status-upcoming {
   background: #dbeafe;
   color: #1e40af;

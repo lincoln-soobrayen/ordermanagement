@@ -66,6 +66,39 @@ export const MAX_NO_ANSWER_ATTEMPTS = 3;
 export const SAMPLE_ORDER_SQL = `(EXISTS (SELECT 1 FROM order_items si WHERE si.order_id = o.id)
   AND NOT EXISTS (SELECT 1 FROM order_items si WHERE si.order_id = o.id AND si.unit_price <> 0))`;
 
+export const INACTIVE_CLIENT_DAYS = 7;
+
+// Clients whose last order is a week old get a call, unless they already have an open follow-up,
+// were dealt with in the last week, or said they are not interested since their last order.
+export async function syncInactiveClientFollowUps(db: { query: Pool["query"] } = pool): Promise<number> {
+  const result = await db.query(
+    `INSERT INTO follow_ups (lead_id, type, due_date, notes)
+     SELECT l.id, 'no_recent_order', CURRENT_DATE, 'No order since ' || to_char(last.last_order, 'DD Mon YYYY')
+     FROM leads l
+     JOIN (
+       SELECT lead_id, MAX(order_date) AS last_order
+       FROM orders
+       WHERE lead_id IS NOT NULL AND status != 'cancelled'
+       GROUP BY lead_id
+     ) last ON last.lead_id = l.id
+     WHERE last.last_order <= CURRENT_DATE - $1::int
+       AND COALESCE(l.status, '') != 'lost'
+       AND NOT EXISTS (
+         SELECT 1 FROM follow_ups f
+         WHERE f.lead_id = l.id
+           AND (
+             f.status IN ('pending', 'unreachable')
+             OR f.created_at >= CURRENT_DATE - $1::int
+             OR f.completed_at >= CURRENT_DATE - $1::int
+             OR (f.outcome = 'not_interested' AND f.completed_at::date >= last.last_order)
+           )
+       )
+     ON CONFLICT DO NOTHING`,
+    [INACTIVE_CLIENT_DAYS]
+  );
+  return result.rowCount || 0;
+}
+
 export async function pruneExpiredSessions(): Promise<void> {
   await pool.query('DELETE FROM "session" WHERE expire < NOW()');
 }
@@ -356,9 +389,19 @@ export async function initDb(): Promise<void> {
         completed_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT valid_follow_up_type CHECK (type IN ('sample_feedback', 'reorder', 'other')),
+        CONSTRAINT valid_follow_up_type CHECK (type IN ('sample_feedback', 'reorder', 'no_recent_order', 'other')),
         CONSTRAINT valid_follow_up_status CHECK (status IN ('pending', 'done', 'unreachable', 'cancelled'))
       )
+    `);
+
+    await client.query(`
+      ALTER TABLE follow_ups DROP CONSTRAINT IF EXISTS valid_follow_up_type;
+      ALTER TABLE follow_ups ADD CONSTRAINT valid_follow_up_type
+        CHECK (type IN ('sample_feedback', 'reorder', 'no_recent_order', 'other'));
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_ups_open_no_recent_order ON follow_ups(lead_id)
+        WHERE type = 'no_recent_order' AND status IN ('pending', 'unreachable');
     `);
 
     await client.query(`
@@ -371,26 +414,18 @@ export async function initDb(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_follow_ups_lead_id ON follow_ups(lead_id);
     `);
 
-    // One-time backfill: delivered orders that are still the client's latest order get a follow-up
-    const followUpsExist = await client.query("SELECT 1 FROM follow_ups LIMIT 1");
-    if (followUpsExist.rows.length === 0) {
-      await client.query(`
-        INSERT INTO follow_ups (lead_id, order_id, type, due_date)
-        SELECT o.lead_id, o.id,
-               CASE WHEN ${SAMPLE_ORDER_SQL} THEN 'sample_feedback' ELSE 'reorder' END,
-               o.updated_at::date + ${DEFAULT_FOLLOW_UP_DAYS}
-        FROM orders o
-        WHERE o.lead_id IS NOT NULL
-          AND o.delivery_status = 'delivered'
-          AND o.status != 'cancelled'
-          AND NOT EXISTS (
-            SELECT 1 FROM orders later
-            WHERE later.lead_id = o.lead_id AND later.id != o.id AND later.status != 'cancelled'
-              AND (later.order_date > o.order_date OR (later.order_date = o.order_date AND later.id > o.id))
-          )
-        ON CONFLICT DO NOTHING
-      `);
-    }
+    // Every delivered order gets exactly one follow-up (the unique order_id index makes this idempotent)
+    await client.query(`
+      INSERT INTO follow_ups (lead_id, order_id, type, due_date)
+      SELECT o.lead_id, o.id,
+             CASE WHEN ${SAMPLE_ORDER_SQL} THEN 'sample_feedback' ELSE 'reorder' END,
+             o.updated_at::date + ${DEFAULT_FOLLOW_UP_DAYS}
+      FROM orders o
+      WHERE o.lead_id IS NOT NULL
+        AND o.delivery_status = 'delivered'
+        AND o.status != 'cancelled'
+      ON CONFLICT DO NOTHING
+    `);
 
     // Drop legacy salespeople table if it exists
     await client.query(`

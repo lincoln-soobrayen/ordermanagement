@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import type { Pool } from "pg";
-import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, Lead, Order, OrderItem, Product, User } from "./db";
+import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, INACTIVE_CLIENT_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, syncInactiveClientFollowUps, Lead, Order, OrderItem, Product, User } from "./db";
 import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
 
@@ -178,13 +178,14 @@ async function scheduleDeliveryFollowUp(orderId: number, userId: number | undefi
   }
 }
 
-async function closeFollowUpsForNewOrder(leadId: number, userId: number | undefined): Promise<void> {
+async function closeFollowUpsForNewOrder(leadId: number, userId: number | undefined, isSample: boolean): Promise<void> {
+  const types = isSample ? ["no_recent_order"] : ["reorder", "sample_feedback", "no_recent_order"];
   try {
     await pool.query(
       `UPDATE follow_ups
        SET status = 'done', outcome = 'placed_order', completed_by = $2, completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-       WHERE lead_id = $1 AND status IN ('pending', 'unreachable') AND type IN ('reorder', 'sample_feedback')`,
-      [leadId, userId || null]
+       WHERE lead_id = $1 AND status IN ('pending', 'unreachable') AND type = ANY($3::text[])`,
+      [leadId, userId || null, types]
     );
   } catch (err) {
     console.error("Could not close follow-ups for lead", leadId, err);
@@ -1007,7 +1008,7 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
     await client.query("COMMIT");
     setFlash(req, "Order created");
     const newOrderId = orderResult.rows[0].id as number;
-    if (lead_id && !isSample) await closeFollowUpsForNewOrder(parseInt(lead_id, 10), req.session.user!.id);
+    if (lead_id) await closeFollowUpsForNewOrder(parseInt(lead_id, 10), req.session.user!.id, isSample);
     if (delivery_status === "delivered") await scheduleDeliveryFollowUp(newOrderId, req.session.user!.id);
   } catch (err) {
     await client.query("ROLLBACK");
@@ -2771,7 +2772,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
     .map(
       (f) => `
         <tr>
-          <td>${escapeHtml(followUpTypeLabel(f.type))}</td>
+          <td>${followUpTypeBadge(f.type)}</td>
           <td>${escapeHtml(isoDateLabel(f.due_iso))}</td>
           <td>${
             f.status === "pending"
@@ -2797,7 +2798,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
           : '<p class="muted">No follow-up scheduled.</p>'
       }
       <form method="post" action="/clients/${client.id}/follow-ups" class="filters follow-up-add">
-        <select name="type">${optionsHtml(followUpTypes, "reorder")}</select>
+        <select name="type">${optionsHtml(manualFollowUpTypes, "reorder")}</select>
         <input type="date" name="due_date" value="${escapeHtml(defaultFollowUpIso)}" required aria-label="Call on">
         <input type="text" name="notes" placeholder="Reason for the call (optional)">
         <button type="submit">+ Add follow-up</button>
@@ -2997,6 +2998,7 @@ app.get("/clients/:id/export", requireAuth, blockDriver, async (req, res) => {
 const followUpTypes = [
   { value: "sample_feedback", label: "Sample feedback" },
   { value: "reorder", label: "Next order" },
+  { value: "no_recent_order", label: `No order in ${INACTIVE_CLIENT_DAYS}+ days` },
   { value: "other", label: "Other" },
 ];
 
@@ -3012,8 +3014,20 @@ const followUpOutcomes: Record<string, { label: string; sampleOnly?: boolean }> 
 const followUpViews = ["due", "upcoming", "unreachable", "done"] as const;
 type FollowUpView = (typeof followUpViews)[number];
 
+const manualFollowUpTypes = followUpTypes.filter((t) => t.value !== "no_recent_order");
+
 function followUpTypeLabel(type: string): string {
   return followUpTypes.find((t) => t.value === type)?.label || labelize(type);
+}
+
+function followUpTypeBadge(type: string): string {
+  return `<span class="badge${type === "no_recent_order" ? " badge-danger" : ""}">${escapeHtml(followUpTypeLabel(type))}</span>`;
+}
+
+function noRecentOrderLabel(daysSinceOrder: number | string | null | undefined): string {
+  if (daysSinceOrder === null || daysSinceOrder === undefined) return "";
+  const days = Number(daysSinceOrder);
+  return days >= INACTIVE_CLIENT_DAYS ? `<span class="status status-overdue">No order for ${escapeHtml(days)} days</span>` : "";
 }
 
 function followUpOutcomeLabel(outcome: string | null | undefined): string {
@@ -3169,7 +3183,8 @@ function followUpCard(f: any, admin: boolean, returnTo: string): string {
           }</span>
         </div>
         <div class="client-order-badges">
-          <span class="badge">${escapeHtml(followUpTypeLabel(f.type))}</span>
+          ${followUpTypeBadge(f.type)}
+          ${noRecentOrderLabel(f.days_since_order)}
           ${statusBadge}
           ${f.attempts > 0 ? `<span class="badge">No answer ×${escapeHtml(f.attempts)}</span>` : ""}
         </div>
@@ -3204,10 +3219,16 @@ app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
   const filters = req.query as FollowUpFilters;
   const view: FollowUpView = followUpViews.includes(filters.view as FollowUpView) ? (filters.view as FollowUpView) : "due";
   const admin = isAdmin(req);
+  try {
+    await syncInactiveClientFollowUps();
+  } catch (err) {
+    console.error("Could not sync inactive-client follow-ups", err);
+  }
   const base = await followUpBaseWhere(req, filters);
 
   const countsResult = await pool.query(
     `SELECT
+       COUNT(*) FILTER (WHERE f.type = 'no_recent_order' AND f.status = 'pending')::int AS inactive,
        COUNT(*) FILTER (WHERE ${followUpViewSql.due.where})::int AS due,
        COUNT(*) FILTER (WHERE ${followUpViewSql.upcoming.where})::int AS upcoming,
        COUNT(*) FILTER (WHERE ${followUpViewSql.unreachable.where})::int AS unreachable,
@@ -3225,7 +3246,7 @@ app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
             o.order_date, o.order_value,
             (SELECT string_agg(p.name || ' ' || trim(to_char(oi.quantity_kg, 'FM999999990.###')) || ' kg', ', ' ORDER BY oi.id)
                FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = f.order_id) AS order_summary,
-            stats.order_count, stats.last_order, stats.avg_gap,
+            stats.order_count, stats.last_order, stats.avg_gap, stats.days_since_order,
             lc.comment AS last_comment, lc.created_at AS last_comment_at
      FROM follow_ups f
      JOIN leads l ON l.id = f.lead_id
@@ -3233,10 +3254,18 @@ app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
      LEFT JOIN users completer ON completer.id = f.completed_by
      LEFT JOIN orders o ON o.id = f.order_id
      LEFT JOIN LATERAL (
-       SELECT COUNT(*)::int AS order_count, MAX(o.order_date) AS last_order,
-              CASE WHEN COUNT(*) > 1 THEN (MAX(o.order_date) - MIN(o.order_date))::numeric / (COUNT(*) - 1) END AS avg_gap
-       FROM orders o
-       WHERE o.lead_id = l.id AND o.status != 'cancelled' AND NOT ${SAMPLE_ORDER_SQL}
+       SELECT COUNT(*) FILTER (WHERE NOT x.is_sample)::int AS order_count,
+              MAX(x.order_date) FILTER (WHERE NOT x.is_sample) AS last_order,
+              CASE WHEN COUNT(*) FILTER (WHERE NOT x.is_sample) > 1
+                THEN (MAX(x.order_date) FILTER (WHERE NOT x.is_sample) - MIN(x.order_date) FILTER (WHERE NOT x.is_sample))::numeric
+                     / (COUNT(*) FILTER (WHERE NOT x.is_sample) - 1)
+              END AS avg_gap,
+              CURRENT_DATE - MAX(x.order_date) AS days_since_order
+       FROM (
+         SELECT o.order_date, ${SAMPLE_ORDER_SQL} AS is_sample
+         FROM orders o
+         WHERE o.lead_id = l.id AND o.status != 'cancelled'
+       ) x
      ) stats ON true
      LEFT JOIN LATERAL (
        SELECT comment, created_at FROM lead_comments WHERE lead_id = l.id ORDER BY created_at DESC LIMIT 1
@@ -3284,6 +3313,7 @@ app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
         <div class="card"><strong>${escapeHtml(counts.overdue)}</strong><span>Overdue</span></div>
         <div class="card"><strong>${escapeHtml(counts.upcoming)}</strong><span>Upcoming</span></div>
         <div class="card"><strong>${escapeHtml(counts.unreachable)}</strong><span>Unreachable</span></div>
+        <a href="${escapeHtml(`/follow-ups?view=due&type=no_recent_order`)}" class="card card-danger"><strong>${escapeHtml(counts.inactive)}</strong><span>No order in ${INACTIVE_CLIENT_DAYS}+ days</span></a>
       </section>
       <nav class="tabs">
         ${tabs
@@ -3316,7 +3346,7 @@ app.get("/follow-ups", requireAuth, blockDriver, async (req, res) => {
           ? result.rows.map((f) => followUpCard(f, admin, returnTo)).join("")
           : `<p class="empty">${escapeHtml(emptyText[view])}</p>`
       }
-      <p class="hint">Follow-ups are created automatically ${DEFAULT_FOLLOW_UP_DAYS} days after an order is delivered: samples get a "Sample feedback" call, other orders a "Next order" call. You can add one by hand from a client's page.</p>`,
+      <p class="hint">Follow-ups are created automatically ${DEFAULT_FOLLOW_UP_DAYS} days after an order is delivered: samples get a "Sample feedback" call, other orders a "Next order" call. Clients whose last order is ${INACTIVE_CLIENT_DAYS} or more days old get a red "No order" call for today. You can add one by hand from a client's page.</p>`,
       req
     )
   );
@@ -3448,13 +3478,21 @@ app.post("/follow-ups/:id/reopen", requireAuth, blockDriver, async (req, res) =>
   const followUp = await loadFollowUpForAction(req, res);
   if (!followUp) return;
   const date = parseIsoDate(req.body.due_date);
-  const r = await pool.query(
-    `UPDATE follow_ups
-     SET status = 'pending', attempts = 0, completed_by = NULL, completed_at = NULL,
-         due_date = COALESCE($2::date, GREATEST(due_date, CURRENT_DATE)), updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
-    [followUp.id, date]
-  );
+  let r;
+  try {
+    r = await pool.query(
+      `UPDATE follow_ups
+       SET status = 'pending', attempts = 0, completed_by = NULL, completed_at = NULL,
+           due_date = COALESCE($2::date, GREATEST(due_date, CURRENT_DATE)), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 RETURNING to_char(due_date, 'YYYY-MM-DD') AS due_iso`,
+      [followUp.id, date]
+    );
+  } catch (err) {
+    if ((err as { code?: string }).code !== "23505") throw err;
+    setFlash(req, "This client already has an open follow-up of this type", "error");
+    res.redirect(safeReturnTo(req.body.return_to));
+    return;
+  }
   setFlash(req, `Follow-up reopened for ${isoDateLabel(r.rows[0].due_iso)}`);
   res.redirect(safeReturnTo(req.body.return_to));
 });
@@ -3465,7 +3503,7 @@ app.post("/clients/:id/follow-ups", requireAuth, blockDriver, async (req, res) =
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
-  const type = followUpTypes.some((t) => t.value === req.body.type) ? req.body.type : "other";
+  const type = manualFollowUpTypes.some((t) => t.value === req.body.type) ? req.body.type : "other";
   const date = parseIsoDate(req.body.due_date);
   const notes = String(req.body.notes || "").trim() || null;
   const r = await pool.query(

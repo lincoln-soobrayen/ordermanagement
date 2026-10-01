@@ -2,7 +2,7 @@ import { httpServerHandler } from "cloudflare:node";
 import { env, waitUntil } from "cloudflare:workers";
 import { Pool } from "pg";
 import { app } from "./app";
-import { usePerRequestPools } from "./db";
+import { syncInactiveClientFollowUps, usePerRequestPools } from "./db";
 
 const PORT = 3000;
 
@@ -21,6 +21,7 @@ export default {
     const cronPool = new Pool({ connectionString: env.HYPERDRIVE.connectionString, max: 1 });
     try {
       await cronPool.query('DELETE FROM "session" WHERE expire < NOW()');
+      await syncInactiveClientFollowUps(cronPool);
     } finally {
       await cronPool.end();
     }

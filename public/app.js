@@ -24,6 +24,62 @@ function stackTables() {
       }
     });
   });
+  addViewToggle();
+}
+
+// Phones: let the page's main tables switch between cards and the classic scrollable list.
+function addViewToggle() {
+  const tables = [...document.querySelectorAll("table.stack-table")].filter(
+    (t) => !t.classList.contains("compact") && !t.parentElement.closest("table")
+  );
+  if (tables.length === 0) return;
+
+  tables.forEach((table) => {
+    if (table.parentElement.classList.contains("table-wrap")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    table.before(wrap);
+    wrap.append(table);
+  });
+
+  const storageKey = `tableView:${window.location.pathname}`;
+  const toggle = document.createElement("div");
+  toggle.className = "view-toggle";
+  toggle.setAttribute("role", "group");
+  toggle.setAttribute("aria-label", "Layout");
+  toggle.innerHTML =
+    '<button type="button" data-view="cards">▦ Cards</button>' +
+    '<button type="button" data-view="list">☰ List</button>';
+  tables[0].parentElement.before(toggle);
+
+  function applyView(view) {
+    tables.forEach((table) => {
+      table.classList.toggle("stack-table", view === "cards");
+      table.classList.toggle("list-view", view === "list");
+    });
+    toggle.querySelectorAll("button").forEach((btn) => {
+      btn.setAttribute("aria-pressed", String(btn.dataset.view === view));
+    });
+  }
+
+  let saved = "cards";
+  try {
+    saved = localStorage.getItem(storageKey) === "list" ? "list" : "cards";
+  } catch (err) {
+    // Storage blocked: default to cards
+  }
+  applyView(saved);
+
+  toggle.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-view]");
+    if (!btn) return;
+    applyView(btn.dataset.view);
+    try {
+      localStorage.setItem(storageKey, btn.dataset.view);
+    } catch (err) {
+      // Storage blocked: the choice lasts until the page reloads
+    }
+  });
 }
 stackTables();
 

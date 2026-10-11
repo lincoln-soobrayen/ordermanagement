@@ -1435,7 +1435,8 @@ tr.is-expanded > td {
   }
 }
 
-.mobile-only {
+.mobile-only,
+.view-toggle {
   display: none;
 }
 
@@ -1644,16 +1645,16 @@ tr.is-expanded > td {
   }
 
   /* Deliveries: customer + status header, big Mark Delivered button */
-  .deliveries-table > tbody > tr > td.cell-id,
-  .deliveries-table > tbody > tr > td.cell-lead {
+  .deliveries-table.stack-table > tbody > tr > td.cell-id,
+  .deliveries-table.stack-table > tbody > tr > td.cell-lead {
     display: none;
   }
 
-  .deliveries-table > tbody > tr > td.cell-title {
+  .deliveries-table.stack-table > tbody > tr > td.cell-title {
     flex: 1 1 0;
   }
 
-  .deliveries-table > tbody > tr > td.cell-status {
+  .deliveries-table.stack-table > tbody > tr > td.cell-status {
     order: -1;
     width: auto;
     border-top: none;
@@ -1661,19 +1662,80 @@ tr.is-expanded > td {
     padding-bottom: 12px;
   }
 
-  .deliveries-table > tbody > tr > td.cell-status::before {
+  .deliveries-table.stack-table > tbody > tr > td.cell-status::before {
     content: none;
   }
 
-  .deliveries-table td.actions > form,
-  .deliveries-table td.actions > .badge {
+  .deliveries-table.stack-table td.actions > form,
+  .deliveries-table.stack-table td.actions > .badge {
     flex: 1 1 100%;
     text-align: center;
   }
 
-  .deliveries-table td.actions > form .button {
+  .deliveries-table.stack-table td.actions > form .button {
     min-height: 48px;
     font-size: 1rem;
+  }
+
+  /* Cards / List switch (phones only) */
+  .view-toggle {
+    display: inline-flex;
+    margin-bottom: 12px;
+    padding: 3px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .view-toggle button {
+    min-height: 38px;
+    padding: 6px 14px;
+    background: transparent;
+    color: var(--muted);
+    box-shadow: none;
+    font-size: 0.88rem;
+  }
+
+  .view-toggle button:hover {
+    background: var(--surface-2);
+    transform: none;
+    box-shadow: none;
+  }
+
+  .view-toggle button[aria-pressed="true"] {
+    background: var(--primary);
+    color: #fff;
+  }
+
+  /* List view: the classic table, scrolling sideways */
+  .list-view .cell-title .mobile-only {
+    display: none;
+  }
+
+  .list-view th,
+  .list-view td {
+    padding: 10px 12px;
+  }
+
+  .list-view > tbody > tr > td.actions {
+    display: table-cell;
+    margin: 0;
+    padding: 8px 12px;
+    border-top: none;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .list-view > tbody > tr > td.actions > * {
+    display: inline-flex;
+    width: auto;
+    margin: 2px 4px 2px 0;
+    vertical-align: middle;
+  }
+
+  .list-view td.actions .button,
+  .list-view td.actions button {
+    width: auto;
   }
 
   .delivery-details {

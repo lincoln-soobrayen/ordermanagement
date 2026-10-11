@@ -266,6 +266,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // Show/hide order details under a delivery row
+  document.querySelectorAll(".toggle-details").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = document.getElementById(btn.getAttribute("aria-controls"));
+      if (!row) return;
+      const open = row.hidden;
+      row.hidden = !open;
+      btn.setAttribute("aria-expanded", String(open));
+      btn.textContent = open ? "Hide" : "Details";
+      btn.closest("tr")?.classList.toggle("is-expanded", open);
+    });
+  });
+
   // Copy order summary to clipboard for WhatsApp
   document.querySelectorAll(".copy-whatsapp").forEach((btn) => {
     btn.addEventListener("click", async () => {

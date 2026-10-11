@@ -1193,7 +1193,7 @@ app.get("/deliveries", requireAuth, async (req, res) => {
   }
 
   const result = await pool.query(
-    `SELECT o.id, o.lead_id, o.customer_name, o.order_value, o.status, o.order_date, o.delivery_status, o.delivery_address, o.delivery_date, o.shipped_date, o.notes, o.created_at, o.updated_at, l.name as lead_name, l.region as lead_region, u.name as owner_name, u.role as owner_role, d.name as driver_name, oi.quantity_sachets, oi.quantity_cartons, oi.quantity_kg
+    `SELECT o.id, o.lead_id, o.user_id, o.customer_name, o.order_value, o.status, o.order_date, o.delivery_status, o.delivery_address, o.delivery_date, o.shipped_date, o.notes, o.created_at, o.updated_at, l.name as lead_name, l.company as lead_company, l.phone as lead_phone, l.region as lead_region, u.name as owner_name, u.role as owner_role, d.name as driver_name, oi.quantity_sachets, oi.quantity_cartons, oi.quantity_kg
      FROM orders o
      LEFT JOIN leads l ON o.lead_id = l.id
      LEFT JOIN users u ON o.user_id = u.id
@@ -1207,6 +1207,23 @@ app.get("/deliveries", requireAuth, async (req, res) => {
      ORDER BY o.delivery_date ASC NULLS LAST, o.order_date DESC`,
     params
   );
+
+  const itemsByOrder = new Map<number, DeliveryItem[]>();
+  if (result.rows.length) {
+    const itemsResult = await pool.query(
+      `SELECT oi.order_id, p.name AS product_name, p.sku, oi.quantity_kg, oi.quantity_sachets, oi.quantity_cartons, oi.unit_price
+       FROM order_items oi
+       JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = ANY($1::int[])
+       ORDER BY oi.id`,
+      [result.rows.map((o) => o.id)]
+    );
+    for (const item of itemsResult.rows as DeliveryItem[]) {
+      const list = itemsByOrder.get(item.order_id) || [];
+      list.push(item);
+      itemsByOrder.set(item.order_id, list);
+    }
+  }
 
   res.send(
     renderPage(
@@ -1229,7 +1246,11 @@ app.get("/deliveries", requireAuth, async (req, res) => {
           <button type="submit">Filter</button>
         </form>
       </div>
-      <div class="table-wrap">${deliveriesTable(result.rows, !driver)}</div>`,
+      <div class="table-wrap">${deliveriesTable(result.rows, !driver, {
+        itemsByOrder,
+        isAdmin: isAdmin(req),
+        userId: req.session.user!.id,
+      })}</div>`,
       req
     )
   );
@@ -1405,8 +1426,79 @@ function whatsappOrderText(o: OrderWithLead, date: string): string {
   return lines.filter(Boolean).join("\n");
 }
 
-function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = false): string {
+interface DeliveryItem {
+  order_id: number;
+  product_name: string;
+  sku: string | null;
+  quantity_kg: string;
+  quantity_sachets: string;
+  quantity_cartons: string;
+  unit_price: string;
+}
+
+interface DeliveryDetailsOptions {
+  itemsByOrder: Map<number, DeliveryItem[]>;
+  isAdmin: boolean;
+  userId: number;
+}
+
+type DeliveryRow = Partial<OrderWithLead> & { lead_company?: string | null; lead_phone?: string | null };
+
+function deliveryDetailsHtml(o: DeliveryRow, opts: DeliveryDetailsOptions, showAdminColumns: boolean): string {
+  const items = opts.itemsByOrder.get(o.id as number) || [];
+  const isSample = items.length > 0 && items.every((i) => Number(i.unit_price) === 0);
+  let totalKg = 0;
+  let totalAmount = 0;
+  const itemRows = items
+    .map((i) => {
+      const kg = Number(i.quantity_kg || 0);
+      const amount = kg * Number(i.unit_price || 0);
+      totalKg += kg;
+      totalAmount += amount;
+      return `
+        <tr>
+          <td>${escapeHtml(i.product_name)}${i.sku ? ` <span class="muted">(${escapeHtml(i.sku)})</span>` : ""}</td>
+          <td class="num">${escapeHtml(qty(i.quantity_kg, 4))}</td>
+          <td class="num">${escapeHtml(qty(i.quantity_sachets))}</td>
+          <td class="num">${escapeHtml(qty(i.quantity_cartons))}</td>
+          <td class="num">${escapeHtml(money(Number(i.unit_price)))}</td>
+          <td class="num">${escapeHtml(money(amount))}</td>
+        </tr>`;
+    })
+    .join("");
+  const canEdit = opts.isAdmin || (showAdminColumns && o.user_id === opts.userId);
+  const links = [
+    showAdminColumns && o.lead_id ? `<a href="/clients/${o.lead_id}" class="button small secondary">Client history</a>` : "",
+    canEdit ? `<a href="/orders/${o.id}/edit" class="button small secondary">Edit order</a>` : "",
+  ].join("");
+
+  return `
+    <div class="delivery-details">
+      <dl class="client-order-meta">
+        <div><dt>Contact</dt><dd>${escapeHtml(o.lead_name || o.customer_name || "—")}${o.lead_company ? ` <span class="muted">(${escapeHtml(o.lead_company)})</span>` : ""}</dd></div>
+        <div><dt>Phone</dt><dd>${phoneLinksHtml(o.lead_phone)}</dd></div>
+        <div><dt>Order date</dt><dd>${escapeHtml(shortDate(o.order_date))}</dd></div>
+        <div><dt>Salesperson</dt><dd>${escapeHtml(o.owner_name || "—")}</dd></div>
+        <div><dt>Driver</dt><dd>${escapeHtml(o.driver_name || "—")}</dd></div>
+        <div><dt>Address</dt><dd>${locationHtml(o.delivery_address)}</dd></div>
+      </dl>
+      ${
+        items.length
+          ? `<table class="data-table compact">
+              <thead><tr><th>Product${isSample ? ' <span class="badge">Sample</span>' : ""}</th><th class="num">Kg</th><th class="num">Sachets</th><th class="num">Cartons</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
+              <tbody>${itemRows}</tbody>
+              <tfoot><tr><td>Total</td><td class="num">${escapeHtml(qty(totalKg, 4))}</td><td></td><td></td><td></td><td class="num">${escapeHtml(money(totalAmount))}</td></tr></tfoot>
+            </table>`
+          : `<p class="muted">No product lines recorded. Order value: ${escapeHtml(money(Number(o.order_value || 0)))}</p>`
+      }
+      ${o.notes ? `<p class="client-order-notes"><strong>Notes:</strong> ${escapeHtml(o.notes)}</p>` : ""}
+      ${links ? `<div class="client-order-actions">${links}</div>` : ""}
+    </div>`;
+}
+
+function deliveriesTable(rows: DeliveryRow[], showAdminColumns: boolean, opts: DeliveryDetailsOptions): string {
   if (rows.length === 0) return "<p class=\"empty\">No deliveries found.</p>";
+  const columnCount = showAdminColumns ? 11 : 9;
   return `
     <table class="data-table">
       <thead>
@@ -1461,11 +1553,15 @@ function deliveriesTable(rows: Partial<OrderWithLead>[], showAdminColumns = fals
             <td>${escapeHtml(qtyLine)}</td>
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
             <td class="actions">
+              <button type="button" class="button small toggle-details" aria-expanded="false" aria-controls="delivery-details-${o.id}">Details</button>
               <button type="button" class="button small secondary copy-whatsapp" data-order-text="${escapeHtml(
                 whatsappOrderText(o as OrderWithLead, new Date(o.order_date || Date.now()).toLocaleDateString())
               )}">Copy</button>
               ${markDeliveredButton}
             </td>
+          </tr>
+          <tr id="delivery-details-${o.id}" class="delivery-details-row" hidden>
+            <td colspan="${columnCount}">${deliveryDetailsHtml(o, opts, showAdminColumns)}</td>
           </tr>`;
             }
           )
@@ -3122,7 +3218,33 @@ function whatsappNumber(phone: string | null | undefined): string | null {
   let digits = (phone || "").replace(/\D/g, "");
   if (digits.startsWith("00")) digits = digits.slice(2);
   if (digits.length === 8) digits = `230${digits}`;
-  return digits.length >= 10 ? digits : null;
+  return digits.length >= 10 && digits.length <= 15 ? digits : null;
+}
+
+// A phone field can hold several numbers, e.g. "59418365 / 57014941".
+function phoneParts(phone: string | null | undefined): string[] {
+  const parts = (phone || "")
+    .split(/[\/,;|]|\s+or\s+/i)
+    .map((p) => p.trim())
+    .filter((p) => p.replace(/\D/g, "").length >= 7);
+  return parts.length ? parts : phone ? [phone.trim()] : [];
+}
+
+function telNumber(phone: string): string {
+  return phone.replace(/[^\d+]/g, "");
+}
+
+function phoneLinksHtml(phone: string | null | undefined): string {
+  const parts = phoneParts(phone);
+  if (!parts.length) return "—";
+  return parts
+    .map((p) => {
+      const wa = whatsappNumber(p);
+      return `<a href="tel:${escapeHtml(telNumber(p))}">${escapeHtml(p)}</a>${
+        wa ? ` (<a href="https://wa.me/${wa}" target="_blank" rel="noopener noreferrer">WhatsApp</a>)` : ""
+      }`;
+    })
+    .join(" · ");
 }
 
 function safeReturnTo(value: unknown, fallback = "/follow-ups"): string {
@@ -3169,7 +3291,6 @@ function followUpCard(f: any, admin: boolean, returnTo: string): string {
   const pending = f.status === "pending";
   const overdue = pending && daysUntil < 0;
   const isSampleType = f.type === "sample_feedback";
-  const wa = whatsappNumber(f.phone);
   const outcomeOptions = Object.entries(followUpOutcomes)
     .filter(([, o]) => !o.sampleOnly || isSampleType)
     .map(([value, o]) => ({ value, label: o.label }));
@@ -3251,8 +3372,18 @@ function followUpCard(f: any, admin: boolean, returnTo: string): string {
       </header>
       <div class="follow-up-body">
         <p class="follow-up-contact">
-          ${f.phone ? `<a href="tel:${escapeHtml(f.phone.replace(/[^\d+]/g, ""))}" class="button small">📞 ${escapeHtml(f.phone)}</a>` : '<span class="muted">No phone number</span>'}
-          ${wa ? `<a href="https://wa.me/${wa}" target="_blank" rel="noopener noreferrer" class="button small secondary">WhatsApp</a>` : ""}
+          ${
+            f.phone
+              ? phoneParts(f.phone)
+                  .map((p) => {
+                    const wa = whatsappNumber(p);
+                    return `<a href="tel:${escapeHtml(telNumber(p))}" class="button small">📞 ${escapeHtml(p)}</a>${
+                      wa ? `<a href="https://wa.me/${wa}" target="_blank" rel="noopener noreferrer" class="button small secondary">WhatsApp</a>` : ""
+                    }`;
+                  })
+                  .join("")
+              : '<span class="muted">No phone number</span>'
+          }
           <span class="muted">${pending ? `Call on ${escapeHtml(isoDateLabel(f.due_iso))}` : ""}</span>
         </p>
         ${orderContext}

@@ -3,8 +3,16 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(title)} — Leads & Orders</title>
+  <meta name="theme-color" content="#4f46e5">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Orders">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -73,6 +81,7 @@ function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followU
         <span class="sidebar-user-avatar">${escapeHtml(userName.charAt(0).toUpperCase())}</span>
         <span class="sidebar-user-name">${escapeHtml(userName)}</span>
       </div>
+      <button type="button" class="sidebar-install" id="install-app" hidden>⬇ Install app</button>
       <form method="post" action="/logout">
         <button type="submit" class="sidebar-logout">Logout</button>
       </form>
@@ -104,7 +113,7 @@ export function statusOptions(selected: string, statuses: string[]): string {
     .map(
       (s) =>
         `<option value="${escapeHtml(s)}" ${s === selected ? "selected" : ""}>${escapeHtml(
-          s.charAt(0).toUpperCase() + s.slice(1)
+          s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ")
         )}</option>`
     )
     .join("");

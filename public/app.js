@@ -1,3 +1,52 @@
+// Label wide table cells with their column header so the CSS can stack rows as cards on phones.
+// Runs before DOMContentLoaded (this script sits at the end of <body>) to avoid a flash of the wide table.
+function stackTables() {
+  document.querySelectorAll("table.data-table").forEach((table) => {
+    const headRow = table.tHead?.rows[0];
+    if (!headRow) return;
+    const labels = [];
+    for (const th of headRow.cells) {
+      for (let i = 0; i < (th.colSpan || 1); i++) labels.push(th.textContent.trim());
+    }
+    if (labels.length <= 3) return;
+    table.classList.add("stack-table");
+    const rows = [...table.tBodies].flatMap((body) => [...body.rows]);
+    if (table.tFoot) rows.push(...table.tFoot.rows);
+    rows.forEach((row) => {
+      if (row.cells.length === 1 && row.cells[0].colSpan > 1) {
+        row.classList.add("full-row");
+        return;
+      }
+      let col = 0;
+      for (const cell of row.cells) {
+        if (!cell.hasAttribute("data-label") && labels[col]) cell.setAttribute("data-label", labels[col]);
+        col += cell.colSpan || 1;
+      }
+    });
+  });
+}
+stackTables();
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((err) => console.warn("Service worker registration failed", err));
+  });
+}
+
+// Chrome (Android/desktop) fires this when the app can be installed; show our own button for it.
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  const installButton = document.getElementById("install-app");
+  if (installButton) installButton.hidden = false;
+});
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  const installButton = document.getElementById("install-app");
+  if (installButton) installButton.hidden = true;
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   // Sidebar menu toggle
   const sidebar = document.getElementById("sidebar");
@@ -327,6 +376,40 @@ document.addEventListener("DOMContentLoaded", () => {
   if (kgPerSachetInput) kgPerSachetInput.addEventListener("input", updateCartonHint);
   if (sachetsPerCartonInput) sachetsPerCartonInput.addEventListener("input", updateCartonHint);
   updateCartonHint();
+
+  document.getElementById("install-app")?.addEventListener("click", async (e) => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    e.currentTarget.hidden = true;
+  });
+
+  // iPhone/iPad have no install prompt: show a one-time hint (logged-in pages only)
+  const isStandalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  let hintDismissed = false;
+  try {
+    hintDismissed = localStorage.getItem("installHintDismissed") === "1";
+  } catch (err) {
+    hintDismissed = true;
+  }
+  if (isIos && !isStandalone && sidebar && !hintDismissed) {
+    const hint = document.createElement("div");
+    hint.className = "install-hint";
+    hint.innerHTML =
+      '<span>Install this app: tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>.</span>' +
+      '<button type="button" class="install-hint-close" aria-label="Dismiss">✕</button>';
+    hint.querySelector("button").addEventListener("click", () => {
+      try {
+        localStorage.setItem("installHintDismissed", "1");
+      } catch (err) {
+        // Private browsing: the hint simply shows again next time
+      }
+      hint.remove();
+    });
+    document.querySelector(".main-content")?.prepend(hint);
+  }
 
   // Close alert messages after 4 seconds
   setTimeout(() => {

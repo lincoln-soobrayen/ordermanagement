@@ -279,6 +279,52 @@ body {
   border-color: var(--danger);
 }
 
+.sidebar-install {
+  width: 100%;
+  background: var(--primary-soft);
+  color: var(--primary);
+  border: 1px solid var(--primary-soft);
+  box-shadow: none;
+}
+
+.sidebar-install:hover {
+  background: var(--primary);
+  color: #fff;
+}
+
+.sidebar-install[hidden] {
+  display: none;
+}
+
+.install-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  background: var(--primary-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.install-hint-close {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.install-hint-close:hover {
+  background: var(--surface);
+  color: var(--text);
+  transform: none;
+}
+
 .sidebar-overlay {
   display: none;
   position: fixed;
@@ -480,7 +526,7 @@ form select {
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   gap: 18px;
   background: var(--surface);
   padding: 28px;
@@ -710,7 +756,7 @@ section {
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -1316,15 +1362,23 @@ tr.is-expanded > td {
 
   .top-bar {
     display: flex;
+    height: calc(56px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
   }
 
   .main-content {
-    padding-top: 80px;
+    padding-top: calc(80px + env(safe-area-inset-top));
+    padding-left: max(28px, env(safe-area-inset-left));
+    padding-right: max(28px, env(safe-area-inset-right));
+    padding-bottom: calc(60px + env(safe-area-inset-bottom));
   }
 
   .sidebar {
     transform: translateX(-100%);
     transition: transform 0.25s ease;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
   }
 
   .sidebar.open {
@@ -1342,7 +1396,7 @@ tr.is-expanded > td {
 
 @media (max-width: 640px) {
   .main-content {
-    padding: 80px 18px 40px;
+    padding: calc(80px + env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
   }
 
   .filters {
@@ -1378,5 +1432,463 @@ tr.is-expanded > td {
 
   h1 {
     font-size: 1.6rem;
+  }
+}
+
+.mobile-only {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-only {
+    display: inline;
+  }
+
+  p.mobile-only {
+    display: block;
+    margin: 0 0 6px;
+  }
+
+  .desktop-only {
+    display: none;
+  }
+
+  /* Wide tables (tagged .stack-table by app.js): one card per row */
+  .stack-table,
+  .stack-table > tbody,
+  .stack-table > tfoot,
+  .stack-table > tbody > tr,
+  .stack-table > tfoot > tr,
+  .stack-table > tbody > tr > td,
+  .stack-table > tfoot > tr > td {
+    display: block;
+    width: 100%;
+  }
+
+  .table-wrap:has(> .stack-table) {
+    overflow: visible;
+  }
+
+  .stack-table {
+    background: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    overflow: visible;
+  }
+
+  .stack-table > thead {
+    display: none;
+  }
+
+  .stack-table > tbody > tr[hidden] {
+    display: none;
+  }
+
+  .stack-table > tbody > tr,
+  .stack-table > tfoot > tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
+
+  .stack-table > tbody > tr:first-child {
+    margin-top: 0;
+  }
+
+  .stack-table > tbody > tr:hover {
+    background: var(--surface);
+  }
+
+  .stack-table > tfoot > tr {
+    background: var(--primary-soft);
+    font-weight: 700;
+  }
+
+  .stack-table > tbody > tr > td,
+  .stack-table > tfoot > tr > td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 9px 16px;
+    border-bottom: none;
+    border-top: 1px solid var(--border);
+    text-align: right;
+    word-break: break-word;
+  }
+
+  .stack-table > tbody > tr > td::before,
+  .stack-table > tfoot > tr > td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+  }
+
+  .stack-table > tbody > tr > td:empty,
+  .stack-table > tfoot > tr > td:empty,
+  .stack-table td.cell-empty {
+    display: none;
+  }
+
+  .stack-table > tbody > tr > td:first-child,
+  .stack-table > tfoot > tr > td:first-child,
+  .stack-table > tbody > tr > td.cell-title {
+    order: -2;
+    flex: 1 1 100%;
+    display: block;
+    border-top: none;
+    padding-top: 14px;
+    padding-bottom: 12px;
+    text-align: left;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+
+  .stack-table > tbody > tr > td:first-child::before,
+  .stack-table > tfoot > tr > td:first-child::before,
+  .stack-table > tbody > tr > td.cell-title::before,
+  .stack-table td.actions::before,
+  .stack-table td.actions-cell::before {
+    content: none;
+  }
+
+  .stack-table > tbody > tr > td.actions,
+  .stack-table > tbody > tr > td.actions-cell {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+    margin-top: 0;
+    padding: 12px 16px 14px;
+  }
+
+  .stack-table td.actions > .button,
+  .stack-table td.actions > form,
+  .stack-table td.actions-cell > .button {
+    flex: 1 1 auto;
+    width: auto;
+    margin: 0;
+  }
+
+  .stack-table td.actions .button,
+  .stack-table td.actions button,
+  .stack-table td.actions-cell .button {
+    min-height: 44px;
+    font-size: 0.92rem;
+    text-align: center;
+  }
+
+  .stack-table td.actions form .button,
+  .stack-table td.actions form button {
+    width: 100%;
+  }
+
+  /* Rows that are a single full-width cell (details panels, "no data" messages) */
+  .stack-table > tbody > tr.full-row {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    margin-top: 8px;
+  }
+
+  .stack-table > tbody > tr.full-row > td {
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-size: inherit;
+    font-weight: inherit;
+  }
+
+  /* Compact tables (order lines) become smaller cards without row dividers */
+  .stack-table.compact > tbody > tr,
+  .stack-table.compact > tfoot > tr {
+    margin-top: 8px;
+    padding: 6px 0;
+    border-radius: var(--radius-sm);
+    box-shadow: none;
+  }
+
+  .stack-table.compact > tbody > tr > td,
+  .stack-table.compact > tfoot > tr > td {
+    padding: 3px 12px;
+    border-top: none;
+    font-size: 0.9rem;
+  }
+
+  .stack-table.compact > tbody > tr > td:first-child,
+  .stack-table.compact > tfoot > tr > td:first-child,
+  .stack-table.compact > tbody > tr > td.cell-title {
+    padding-top: 4px;
+    padding-bottom: 4px;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  .stack-table.compact > tbody > tr > td::before,
+  .stack-table.compact > tfoot > tr > td::before {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* Deliveries: customer + status header, big Mark Delivered button */
+  .deliveries-table > tbody > tr > td.cell-id,
+  .deliveries-table > tbody > tr > td.cell-lead {
+    display: none;
+  }
+
+  .deliveries-table > tbody > tr > td.cell-title {
+    flex: 1 1 0;
+  }
+
+  .deliveries-table > tbody > tr > td.cell-status {
+    order: -1;
+    width: auto;
+    border-top: none;
+    padding-top: 14px;
+    padding-bottom: 12px;
+  }
+
+  .deliveries-table > tbody > tr > td.cell-status::before {
+    content: none;
+  }
+
+  .deliveries-table td.actions > form,
+  .deliveries-table td.actions > .badge {
+    flex: 1 1 100%;
+    text-align: center;
+  }
+
+  .deliveries-table td.actions > form .button {
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .delivery-details {
+    padding: 14px;
+  }
+
+  .delivery-details .client-order-meta,
+  .client-order .client-order-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .client-order-actions .button {
+    flex: 1 1 0;
+    min-height: 42px;
+    text-align: center;
+  }
+
+  /* Order form: one card per product line */
+  .sales-order-lines {
+    padding: 14px;
+  }
+
+  .sales-order-header .button {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+
+  .sales-order-table-wrap {
+    overflow: visible;
+    border: none;
+  }
+
+  .sales-order-table {
+    min-width: 0;
+    background: transparent;
+  }
+
+  .sales-order-table thead {
+    display: none;
+  }
+
+  .sales-order-table,
+  .sales-order-table tbody,
+  .sales-order-table td {
+    display: block;
+  }
+
+  .sales-order-table tr.sales-order-line {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    margin-bottom: 12px;
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .sales-order-table td {
+    padding: 0;
+    border: none;
+  }
+
+  .sales-order-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .sales-order-table td.line-product-cell {
+    grid-column: 1 / -1;
+  }
+
+  .sales-order-table select,
+  .sales-order-table input {
+    min-width: 0;
+  }
+
+  .sales-order-table .line-total {
+    align-self: center;
+    text-align: left;
+    font-size: 1.05rem;
+  }
+
+  .sales-order-table td.line-remove-cell {
+    align-self: end;
+    justify-self: end;
+  }
+
+  .sales-order-table td.line-remove-cell::before {
+    content: none;
+  }
+
+  .sales-order-table .remove-line {
+    min-height: 44px;
+    padding: 8px 16px;
+    font-size: 0.95rem;
+  }
+
+  /* 16px text stops iOS Safari zooming in when a field is focused */
+  body input,
+  body select,
+  body textarea,
+  .sales-order-table input,
+  .sales-order-table select {
+    font-size: 16px;
+  }
+
+  a.button,
+  button,
+  .button {
+    min-height: 44px;
+  }
+
+  .button.small {
+    min-height: 40px;
+  }
+
+  .sidebar-link {
+    min-height: 46px;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    margin-bottom: 16px;
+  }
+
+  h2 {
+    margin: 28px 0 14px;
+  }
+
+  .page-title-row {
+    margin-bottom: 16px;
+  }
+
+  .page-title-row > .button,
+  .page-title-row > .title-actions {
+    flex: 1 1 100%;
+  }
+
+  .title-actions .button,
+  .title-actions button {
+    flex: 1 1 auto;
+  }
+
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .card strong {
+    font-size: 1.2rem;
+    word-break: break-word;
+  }
+
+  .card span {
+    font-size: 0.8rem;
+  }
+
+  .chart-wrap {
+    height: 280px;
+    padding: 12px;
+  }
+
+  .lead-summary {
+    padding: 16px;
+  }
+
+  .client-order {
+    padding: 14px;
+  }
+
+  .comment-meta {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .tab {
+    padding: 10px;
+  }
+
+  .follow-up-card {
+    padding: 14px;
+  }
+
+  .follow-up-actions > .button,
+  .follow-up-actions > form,
+  .follow-up-actions > a {
+    flex: 1 1 auto;
+  }
+
+  .follow-up-actions form .button,
+  .follow-up-actions form button {
+    width: 100%;
+  }
+
+  .follow-up-reschedule input,
+  .follow-up-add input,
+  .follow-up-add select {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .login-box {
+    margin: 40px auto;
+    padding: 24px;
   }
 }

@@ -437,9 +437,7 @@ app.get("/dashboard", requireAuth, blockDriver, async (req, res) => {
     rows
       .map(
         (r) =>
-          `<div class="card"><span class="badge">${escapeHtml(r.count)}</span><strong>${escapeHtml(
-            r.status.charAt(0).toUpperCase() + r.status.slice(1)
-          )}</strong></span></div>`
+          `<div class="card"><span class="badge">${escapeHtml(r.count)}</span><strong>${escapeHtml(labelize(r.status))}</strong></div>`
       )
       .join("");
 
@@ -1372,18 +1370,18 @@ function orderFormFields(
     </script>
     <template id="sales-order-line-template">
       <tr class="sales-order-line">
-        <td>
+        <td class="line-product-cell" data-label="Product">
           <select name="product_id[]" class="line-product" required>
             <option value="">— Select product —</option>
             ${productOptions}
           </select>
         </td>
-        <td><input type="number" step="0.0001" name="quantity_kg[]" class="line-qty-kg" placeholder="kg" inputmode="decimal"></td>
-        <td><input type="number" step="0.0001" name="quantity_sachets[]" class="line-qty-sachets" placeholder="sachets" inputmode="decimal"></td>
-        <td><input type="number" step="0.0001" name="quantity_cartons[]" class="line-qty-cartons" placeholder="cartons" inputmode="decimal"></td>
-        <td><input type="number" step="0.01" name="unit_price[]" class="line-unit-price" placeholder="Rs/kg" inputmode="decimal"></td>
-        <td class="line-total">Rs 0.00</td>
-        <td><button type="button" class="button small danger remove-line">×</button></td>
+        <td data-label="Kg"><input type="number" step="0.0001" name="quantity_kg[]" class="line-qty-kg" placeholder="kg" inputmode="decimal"></td>
+        <td data-label="Sachets"><input type="number" step="0.0001" name="quantity_sachets[]" class="line-qty-sachets" placeholder="sachets" inputmode="decimal"></td>
+        <td data-label="Cartons"><input type="number" step="0.0001" name="quantity_cartons[]" class="line-qty-cartons" placeholder="cartons" inputmode="decimal"></td>
+        <td data-label="Unit price"><input type="number" step="0.01" name="unit_price[]" class="line-unit-price" placeholder="Rs/kg" inputmode="decimal"></td>
+        <td class="line-total" data-label="Line total">Rs 0.00</td>
+        <td class="line-remove-cell"><button type="button" class="button small danger remove-line" aria-label="Remove product">×<span class="mobile-only"> Remove</span></button></td>
       </tr>
     </template>
   `;
@@ -1457,12 +1455,12 @@ function deliveryDetailsHtml(o: DeliveryRow, opts: DeliveryDetailsOptions, showA
       totalAmount += amount;
       return `
         <tr>
-          <td>${escapeHtml(i.product_name)}${i.sku ? ` <span class="muted">(${escapeHtml(i.sku)})</span>` : ""}</td>
-          <td class="num">${escapeHtml(qty(i.quantity_kg, 4))}</td>
-          <td class="num">${escapeHtml(qty(i.quantity_sachets))}</td>
-          <td class="num">${escapeHtml(qty(i.quantity_cartons))}</td>
-          <td class="num">${escapeHtml(money(Number(i.unit_price)))}</td>
-          <td class="num">${escapeHtml(money(amount))}</td>
+          <td class="cell-title">${escapeHtml(i.product_name)}${i.sku ? ` <span class="muted">(${escapeHtml(i.sku)})</span>` : ""}</td>
+          <td class="num" data-label="Kg">${escapeHtml(qty(i.quantity_kg, 4))}</td>
+          <td class="num${Number(i.quantity_sachets || 0) ? "" : " cell-empty"}" data-label="Sachets">${escapeHtml(qty(i.quantity_sachets))}</td>
+          <td class="num${Number(i.quantity_cartons || 0) ? "" : " cell-empty"}" data-label="Cartons">${escapeHtml(qty(i.quantity_cartons))}</td>
+          <td class="num" data-label="Unit price">${escapeHtml(money(Number(i.unit_price)))}</td>
+          <td class="num" data-label="Amount">${escapeHtml(money(amount))}</td>
         </tr>`;
     })
     .join("");
@@ -1484,10 +1482,11 @@ function deliveryDetailsHtml(o: DeliveryRow, opts: DeliveryDetailsOptions, showA
       </dl>
       ${
         items.length
-          ? `<table class="data-table compact">
+          ? `${isSample ? '<p class="mobile-only"><span class="badge">Sample</span></p>' : ""}
+            <table class="data-table compact items-table">
               <thead><tr><th>Product${isSample ? ' <span class="badge">Sample</span>' : ""}</th><th class="num">Kg</th><th class="num">Sachets</th><th class="num">Cartons</th><th class="num">Unit price</th><th class="num">Amount</th></tr></thead>
               <tbody>${itemRows}</tbody>
-              <tfoot><tr><td>Total</td><td class="num">${escapeHtml(qty(totalKg, 4))}</td><td></td><td></td><td></td><td class="num">${escapeHtml(money(totalAmount))}</td></tr></tfoot>
+              <tfoot><tr><td class="cell-title">Total</td><td class="num" data-label="Kg">${escapeHtml(qty(totalKg, 4))}</td><td class="cell-empty"></td><td class="cell-empty"></td><td class="cell-empty"></td><td class="num" data-label="Amount">${escapeHtml(money(totalAmount))}</td></tr></tfoot>
             </table>`
           : `<p class="muted">No product lines recorded. Order value: ${escapeHtml(money(Number(o.order_value || 0)))}</p>`
       }
@@ -1500,7 +1499,7 @@ function deliveriesTable(rows: DeliveryRow[], showAdminColumns: boolean, opts: D
   if (rows.length === 0) return "<p class=\"empty\">No deliveries found.</p>";
   const columnCount = showAdminColumns ? 11 : 9;
   return `
-    <table class="data-table">
+    <table class="data-table deliveries-table">
       <thead>
         <tr><th>Order ID</th><th>Lead ID</th><th>Customer</th>${showAdminColumns ? "<th>Salesperson</th><th>Driver</th>" : ""}<th>Region</th><th>Address</th><th>Delivery Date</th><th>Status</th><th>Quantity</th><th>Value</th><th>Actions</th></tr>
       </thead>
@@ -1530,7 +1529,7 @@ function deliveriesTable(rows: DeliveryRow[], showAdminColumns: boolean, opts: D
               const address = o.delivery_address || "—";
               const addressCell =
                 address.startsWith("http://") || address.startsWith("https://")
-                  ? `<a href="${escapeHtml(address)}" target="_blank" rel="noopener noreferrer">${escapeHtml(address)}</a>`
+                  ? `<a href="${escapeHtml(address)}" target="_blank" rel="noopener noreferrer"><span class="desktop-only">${escapeHtml(address)}</span><span class="mobile-only">📍 Open map</span></a>`
                   : escapeHtml(address);
               const qtyParts: string[] = [];
               if (o.quantity_kg && Number(o.quantity_kg) > 0) qtyParts.push(`${Number(o.quantity_kg).toLocaleString(undefined, { maximumFractionDigits: 4 })} kg`);
@@ -1541,18 +1540,18 @@ function deliveriesTable(rows: DeliveryRow[], showAdminColumns: boolean, opts: D
                 ? o.lead_region.charAt(0).toUpperCase() + o.lead_region.slice(1)
                 : "—";
               return `
-          <tr>
-            <td>${escapeHtml(o.id)}</td>
-            <td>${escapeHtml(o.lead_id || "—")}</td>
-            <td>${escapeHtml(o.customer_name)}</td>
-            ${showAdminColumns ? `<td>${escapeHtml(o.owner_name || "—")}</td><td>${escapeHtml(o.driver_name || "—")}</td>` : ""}
-            <td>${escapeHtml(regionLabel)}</td>
-            <td>${addressCell}</td>
-            <td>${escapeHtml(deliveryDate)}</td>
-            <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
-            <td>${escapeHtml(qtyLine)}</td>
-            <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
-            <td class="actions">
+          <tr class="delivery-row">
+            <td class="cell-id" data-label="Order">${escapeHtml(o.id)}</td>
+            <td class="cell-lead" data-label="Lead ID">${escapeHtml(o.lead_id || "—")}</td>
+            <td class="cell-title" data-label="Customer"><span class="mobile-only muted">#${escapeHtml(o.id)}</span> ${escapeHtml(o.customer_name)}</td>
+            ${showAdminColumns ? `<td data-label="Salesperson">${escapeHtml(o.owner_name || "—")}</td><td data-label="Driver">${escapeHtml(o.driver_name || "—")}</td>` : ""}
+            <td data-label="Region">${escapeHtml(regionLabel)}</td>
+            <td class="cell-address" data-label="Address">${addressCell}</td>
+            <td data-label="Delivery">${escapeHtml(deliveryDate)}</td>
+            <td class="cell-status" data-label="Status"><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
+            <td data-label="Quantity">${escapeHtml(qtyLine)}</td>
+            <td data-label="Value">Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
+            <td class="actions cell-actions">
               <button type="button" class="button small toggle-details" aria-expanded="false" aria-controls="delivery-details-${o.id}">Details</button>
               <button type="button" class="button small secondary copy-whatsapp" data-order-text="${escapeHtml(
                 whatsappOrderText(o as OrderWithLead, new Date(o.order_date || Date.now()).toLocaleDateString())
@@ -1575,7 +1574,7 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Customer</th><th>Lead</th><th>Owner</th><th>Status</th><th>Date</th><th>Value</th>${
+        <tr><th>Customer</th><th>Lead</th><th>Owner</th><th>Status</th><th>Delivery</th><th>Date</th><th>Value</th>${
           actions ? "<th>Actions</th>" : ""
         }</tr>
       </thead>
@@ -1598,9 +1597,7 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
             <td>${escapeHtml(
               o.owner_name ? `${o.owner_name} (${o.owner_role})` : "—"
             )}</td>
-            <td><span class="status status-${escapeHtml(o.status)}">${escapeHtml(
-              o.status?.charAt(0).toUpperCase() + (o.status?.slice(1) || "")
-            )}</span></td>
+            <td><span class="status status-${escapeHtml(o.status)}">${escapeHtml(labelize(o.status))}</span></td>
             <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
             <td>${escapeHtml(date)}</td>
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>

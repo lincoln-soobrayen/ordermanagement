@@ -999,7 +999,7 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
     );
     for (const line of lines) {
       await client.query(
-        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price, unit_cost) VALUES ($1, $2, $3, $4, $5, $6, (SELECT cost_price FROM products WHERE id = $2))",
         [orderResult.rows[0].id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
       );
     }
@@ -1113,11 +1113,19 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
         req.params.id,
       ]
     );
+    const savedCosts = await client.query(
+      "SELECT product_id, unit_cost FROM order_items WHERE order_id = $1 AND unit_cost IS NOT NULL",
+      [req.params.id]
+    );
+    const costByProduct = new Map<number, number>(
+      savedCosts.rows.map((r: { product_id: number; unit_cost: string }) => [Number(r.product_id), Number(r.unit_cost)])
+    );
     await client.query("DELETE FROM order_items WHERE order_id = $1", [req.params.id]);
     for (const line of lines) {
+      const savedCost = costByProduct.get(Number(line.product_id));
       await client.query(
-        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price) VALUES ($1, $2, $3, $4, $5, $6)",
-        [req.params.id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
+        "INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price, unit_cost) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7::numeric, (SELECT cost_price FROM products WHERE id = $2)))",
+        [req.params.id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price, savedCost ?? null]
       );
     }
     await client.query("COMMIT");
@@ -1933,6 +1941,7 @@ function productFormFields(product: Partial<Product>): string {
     <label>Selling Price (Rs per kg) *<input type="number" step="0.01" name="selling_price" value="${escapeHtml(
       product.selling_price ?? ""
     )}" required></label>
+    <p class="full muted">Price changes apply to new orders only. Past orders keep the cost and selling price they were saved with.</p>
     <label>Stock (kg) *<input type="number" step="0.01" name="stock_kg" id="stock-kg" value="${escapeHtml(
       product.stock_kg ?? ""
     )}" required></label>
@@ -2235,12 +2244,12 @@ function money(n: number): string {
 }
 
 const MARGIN_HINT =
-  "Revenue, cost and margin count paid orders only. Free samples are shown separately as sample cost. Cancelled orders are excluded, and cost uses each product's current cost price.";
+  "Revenue, cost and margin count paid orders only. Free samples are shown separately as sample cost. Cancelled orders are excluded, and cost uses each product's cost price at the time of the order.";
 
 // One row per order line, flagged when its order is a free sample.
 function marginLinesSql(where: string): string {
   return `SELECT o.id AS order_id, o.order_date, o.customer_name, ${SAMPLE_ORDER_SQL} AS is_sample,
-                 oi.unit_price * oi.quantity_kg AS amount, p.cost_price * oi.quantity_kg AS cost
+                 oi.unit_price * oi.quantity_kg AS amount, COALESCE(oi.unit_cost, p.cost_price) * oi.quantity_kg AS cost
           FROM orders o
           JOIN order_items oi ON o.id = oi.order_id
           JOIN products p ON oi.product_id = p.id
@@ -2629,7 +2638,7 @@ async function queryClients(req: Request, filters: ClientListFilters) {
               MAX(o.order_date) AS last_order
        FROM orders o
        LEFT JOIN (
-         SELECT oi.order_id, SUM(oi.quantity_kg) AS kg, SUM(p.cost_price * oi.quantity_kg) AS cost,
+         SELECT oi.order_id, SUM(oi.quantity_kg) AS kg, SUM(COALESCE(oi.unit_cost, p.cost_price) * oi.quantity_kg) AS cost,
                 BOOL_AND(oi.unit_price = 0) AS is_sample
          FROM order_items oi
          JOIN products p ON p.id = oi.product_id
@@ -2844,7 +2853,7 @@ async function loadClientHistory(req: Request, res: Response) {
   const itemsByOrder = new Map<number, ClientOrderItem[]>();
   if (orders.length) {
     const itemsResult = await pool.query(
-      `SELECT oi.order_id, p.name AS product_name, p.sku, oi.quantity_kg, oi.quantity_sachets, oi.quantity_cartons, oi.unit_price, p.cost_price
+      `SELECT oi.order_id, p.name AS product_name, p.sku, oi.quantity_kg, oi.quantity_sachets, oi.quantity_cartons, oi.unit_price, COALESCE(oi.unit_cost, p.cost_price) AS cost_price
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
        WHERE oi.order_id = ANY($1::int[])

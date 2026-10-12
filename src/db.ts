@@ -270,6 +270,15 @@ export async function initDb(): Promise<void> {
     `);
 
     await client.query(`
+      ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost DECIMAL(12, 2)
+    `);
+    await client.query(`
+      UPDATE order_items oi SET unit_cost = p.cost_price
+      FROM products p
+      WHERE p.id = oi.product_id AND oi.unit_cost IS NULL
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
     `);
     await client.query(`
@@ -537,6 +546,7 @@ export interface OrderItem {
   quantity_sachets: number;
   quantity_cartons: number;
   unit_price: number;
+  unit_cost: number | null;
 }
 
 export interface User {

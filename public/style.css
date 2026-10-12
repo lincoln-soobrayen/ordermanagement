@@ -1012,6 +1012,39 @@ section {
   text-align: right;
 }
 
+.sales-order-table .line-price-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.save-client-prices {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-client-prices[hidden] {
+  display: none;
+}
+
+.save-client-prices input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+
+.client-prices-table .client-price-input {
+  width: 9rem;
+  margin: 0;
+  text-align: right;
+}
+
+.client-prices-table tr.has-client-price td:first-child {
+  font-weight: 600;
+}
+
 .sales-order-table .remove-line {
   padding: 6px 10px;
   font-size: 1rem;

@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, INACTIVE_CLIENT_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, syncInactiveClientFollowUps, Lead, Order, OrderItem, Product, User } from "./db";
 import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
@@ -190,6 +190,59 @@ async function closeFollowUpsForNewOrder(leadId: number, userId: number | undefi
   } catch (err) {
     console.error("Could not close follow-ups for lead", leadId, err);
   }
+}
+
+async function loadClientPrices(leadId: number | null | undefined): Promise<Map<number, number>> {
+  const prices = new Map<number, number>();
+  if (!leadId) return prices;
+  const result = await pool.query("SELECT product_id, price_per_kg FROM client_prices WHERE lead_id = $1", [leadId]);
+  for (const r of result.rows) prices.set(Number(r.product_id), Number(r.price_per_kg));
+  return prices;
+}
+
+async function saveClientPrice(db: Pool | PoolClient, leadId: number, productId: number, price: number, userId: number | undefined): Promise<void> {
+  await db.query(
+    `INSERT INTO client_prices (lead_id, product_id, price_per_kg, updated_by, updated_at)
+     VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+     ON CONFLICT (lead_id, product_id) DO UPDATE
+     SET price_per_kg = EXCLUDED.price_per_kg, updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP`,
+    [leadId, productId, price, userId || null]
+  );
+}
+
+// Only prices that differ from what the form would have filled in are saved, so a
+// client is never pinned to today's normal price by accident.
+async function saveChangedClientPrices(db: PoolClient, leadId: number, lines: OrderLineInput[], userId: number | undefined): Promise<number> {
+  const priced = lines.filter((l) => l.unit_price > 0);
+  if (!priced.length) return 0;
+  const defaults = await db.query(
+    `SELECT p.id, COALESCE(cp.price_per_kg, p.selling_price) AS default_price
+     FROM products p
+     LEFT JOIN client_prices cp ON cp.product_id = p.id AND cp.lead_id = $1
+     WHERE p.id = ANY($2::int[])`,
+    [leadId, priced.map((l) => l.product_id)]
+  );
+  const defaultById = new Map<number, number>(defaults.rows.map((r) => [Number(r.id), Number(r.default_price)]));
+  const changed = new Map<number, number>();
+  for (const line of priced) {
+    const current = defaultById.get(line.product_id);
+    if (current === undefined || Math.abs(current - line.unit_price) < 0.005) continue;
+    changed.set(line.product_id, line.unit_price);
+  }
+  for (const [productId, price] of changed) {
+    await saveClientPrice(db, leadId, productId, price, userId);
+  }
+  return changed.size;
+}
+
+async function clientPricesTarget(req: Request, leadId: string | undefined, isSample: boolean): Promise<number | null> {
+  const id = parseInt(String(leadId || ""), 10);
+  if (!req.body.save_client_prices || isSample || !id) return null;
+  return (await canAccessLead(req, id)) ? id : null;
+}
+
+function clientPricesFlash(count: number): string {
+  return count ? ` · ${count} client price${count === 1 ? "" : "s"} saved` : "";
 }
 
 interface OrderLineInput {
@@ -912,12 +965,18 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
   }
   const drivers = (await pool.query("SELECT id, name FROM users WHERE role = 'driver' AND is_active = true ORDER BY name")).rows;
   let initialLines: { product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; unit_price?: number }[] = [];
+  let clientPrices = new Map<number, number>();
+  let clientName = "";
   if (lead_id) {
     const leadResult = await pool.query(
       "SELECT id, name, company, email, phone, value, delivery_location FROM leads WHERE id = $1",
       [lead_id]
     );
     const lead = leadResult.rows[0];
+    if (lead && (await canAccessLead(req, lead.id))) {
+      clientPrices = await loadClientPrices(lead.id);
+      clientName = lead.company || lead.name;
+    }
     if (lead) {
       prefilled = {
         lead_id: parseInt(lead_id, 10),
@@ -936,7 +995,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
     if (product) {
       initialLines = [{
         product_id: parseInt(product_id, 10),
-        unit_price: product.selling_price || 0,
+        unit_price: clientPrices.get(Number(product.id)) ?? (product.selling_price || 0),
         quantity_kg: 0,
         quantity_sachets: 0,
         quantity_cartons: 0,
@@ -952,7 +1011,7 @@ app.get("/orders/new", requireAuth, blockDriver, async (req, res) => {
       `
       <h1>New Order</h1>
       <form method="post" action="/orders" class="form-grid">
-        ${orderFormFields(prefilled, leads.rows, products.rows, owners, drivers, initialLines)}
+        ${orderFormFields(prefilled, leads.rows, products.rows, owners, drivers, initialLines, clientPrices, clientName)}
         <div class="actions">
           <button type="submit">Save Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -977,6 +1036,7 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
     }
   }
   const customer_name = await customerNameFromLead(lead_id);
+  const savePricesFor = await clientPricesTarget(req, lead_id, isSample);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -1003,8 +1063,9 @@ app.post("/orders", requireAuth, blockDriver, async (req, res) => {
         [orderResult.rows[0].id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
       );
     }
+    const savedPrices = savePricesFor ? await saveChangedClientPrices(client, savePricesFor, lines, req.session.user!.id) : 0;
     await client.query("COMMIT");
-    setFlash(req, "Order created");
+    setFlash(req, `Order created${clientPricesFlash(savedPrices)}`);
     const newOrderId = orderResult.rows[0].id as number;
     if (lead_id) await closeFollowUpsForNewOrder(parseInt(lead_id, 10), req.session.user!.id, isSample);
     if (delivery_status === "delivered") await scheduleDeliveryFollowUp(newOrderId, req.session.user!.id);
@@ -1059,13 +1120,17 @@ app.get("/orders/:id/edit", requireAuth, blockDriver, async (req, res) => {
   if (editLines.length > 0) {
     (order as any).is_sample = (editLines[0].unit_price || 0) === 0;
   }
+  const clientPrices = await loadClientPrices(order.lead_id);
+  const clientName = order.lead_id
+    ? ((await pool.query("SELECT COALESCE(company, name) AS label FROM leads WHERE id = $1", [order.lead_id])).rows[0]?.label as string) || ""
+    : "";
   res.send(
     renderPage(
       "Edit Order",
       `
       <h1>Edit Order</h1>
       <form method="post" action="/orders/${escapeHtml(order.id)}/update" class="form-grid">
-        ${orderFormFields(order, leads.rows, products.rows, owners, drivers, editLines)}
+        ${orderFormFields(order, leads.rows, products.rows, owners, drivers, editLines, clientPrices, clientName)}
         <div class="actions">
           <button type="submit">Update Order</button>
           <a href="/orders" class="button secondary">Cancel</a>
@@ -1094,6 +1159,7 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     }
   }
   const customer_name = await customerNameFromLead(lead_id);
+  const savePricesFor = await clientPricesTarget(req, lead_id, isSample);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -1128,8 +1194,9 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
         [req.params.id, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price, savedCost ?? null]
       );
     }
+    const savedPrices = savePricesFor ? await saveChangedClientPrices(client, savePricesFor, lines, req.session.user!.id) : 0;
     await client.query("COMMIT");
-    setFlash(req, "Order updated");
+    setFlash(req, `Order updated${clientPricesFlash(savedPrices)}`);
     if (delivery_status === "delivered") await scheduleDeliveryFollowUp(parseInt(req.params.id, 10), req.session.user!.id);
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1268,7 +1335,9 @@ function orderFormFields(
   products: { id: number; name: string; cost_price: number; selling_price: number; kg_per_sachet: number; sachets_per_carton: number }[] = [],
   owners: { id: number; name: string; role: string }[] = [],
   drivers: { id: number; name: string }[] = [],
-  lines: { product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; unit_price?: number }[] = []
+  lines: { product_id?: number; quantity_kg?: number; quantity_sachets?: number; quantity_cartons?: number; unit_price?: number }[] = [],
+  clientPrices: Map<number, number> = new Map(),
+  clientName = ""
 ): string {
   const leadOptions = leads
     .map(
@@ -1279,12 +1348,14 @@ function orderFormFields(
     )
     .join("");
   const productOptions = products
-    .map(
-      (p) =>
-        `<option value="${p.id}" data-selling-price="${p.selling_price || 0}" data-kg-per-sachet="${p.kg_per_sachet || 1}" data-sachets-per-carton="${p.sachets_per_carton || 1}" data-name="${escapeHtml(p.name)}" ${p.id === order.product_id ? "selected" : ""}>${escapeHtml(p.name)} — Rs ${Number(
-          p.selling_price || 0
-        ).toLocaleString()}/kg</option>`
-    )
+    .map((p) => {
+      const clientPrice = clientPrices.get(Number(p.id));
+      const priceLabel =
+        clientPrice !== undefined
+          ? `Rs ${clientPrice.toLocaleString()}/kg (client price)`
+          : `Rs ${Number(p.selling_price || 0).toLocaleString()}/kg`;
+      return `<option value="${p.id}" data-selling-price="${p.selling_price || 0}" data-kg-per-sachet="${p.kg_per_sachet || 1}" data-sachets-per-carton="${p.sachets_per_carton || 1}" data-name="${escapeHtml(p.name)}" ${p.id === order.product_id ? "selected" : ""}>${escapeHtml(p.name)} — ${escapeHtml(priceLabel)}</option>`;
+    })
     .join("");
   const ownerOptions = owners
     .map(
@@ -1315,6 +1386,7 @@ function orderFormFields(
     id: p.id,
     name: p.name,
     selling_price: p.selling_price || 0,
+    client_price: clientPrices.get(Number(p.id)) ?? null,
     kg_per_sachet: p.kg_per_sachet || 1,
     sachets_per_carton: p.sachets_per_carton || 1,
   }));
@@ -1351,6 +1423,13 @@ function orderFormFields(
       </div>
       <p class="empty" id="no-lines-message" style="display: none;">No products added. Click "Add Product" to start.</p>
     </div>
+    ${
+      clientName
+        ? `<label class="full save-client-prices" id="save-client-prices"${isSample ? " hidden" : ""}>
+      <input type="checkbox" name="save_client_prices" value="1"> Save these prices as ${escapeHtml(clientName)}'s prices for next time
+    </label>`
+        : ""
+    }
     <div class="total-price-card full">
       <div class="total-price-label">Order Total</div>
       <div class="total-price-amount" id="total-price-display">Rs 0.00</div>
@@ -1387,7 +1466,7 @@ function orderFormFields(
         <td data-label="Kg"><input type="number" step="0.0001" name="quantity_kg[]" class="line-qty-kg" placeholder="kg" inputmode="decimal"></td>
         <td data-label="Sachets"><input type="number" step="0.0001" name="quantity_sachets[]" class="line-qty-sachets" placeholder="sachets" inputmode="decimal"></td>
         <td data-label="Cartons"><input type="number" step="0.0001" name="quantity_cartons[]" class="line-qty-cartons" placeholder="cartons" inputmode="decimal"></td>
-        <td data-label="Unit price"><input type="number" step="0.01" name="unit_price[]" class="line-unit-price" placeholder="Rs/kg" inputmode="decimal"></td>
+        <td data-label="Unit price"><input type="number" step="0.01" name="unit_price[]" class="line-unit-price" placeholder="Rs/kg" inputmode="decimal"><small class="muted line-price-note"></small></td>
         <td class="line-total" data-label="Line total">Rs 0.00</td>
         <td class="line-remove-cell"><button type="button" class="button small danger remove-line" aria-label="Remove product">×<span class="mobile-only"> Remove</span></button></td>
       </tr>
@@ -2961,6 +3040,54 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
       </form>
     </section>`;
 
+  const pricesResult = await pool.query(
+    `SELECT p.id, p.name, p.sku, p.selling_price, cp.price_per_kg, cp.updated_at, u.name AS updated_by_name
+     FROM products p
+     LEFT JOIN client_prices cp ON cp.product_id = p.id AND cp.lead_id = $1
+     LEFT JOIN users u ON u.id = cp.updated_by
+     ORDER BY (cp.price_per_kg IS NULL), p.name`,
+    [client.id]
+  );
+  const priceRows = pricesResult.rows
+    .map((p) => {
+      const listPrice = Number(p.selling_price || 0);
+      const hasClientPrice = p.price_per_kg !== null;
+      const clientPrice = hasClientPrice ? Number(p.price_per_kg) : null;
+      const diff = clientPrice !== null ? clientPrice - listPrice : 0;
+      const diffLabel =
+        clientPrice === null
+          ? '<span class="muted">—</span>'
+          : `${diff > 0 ? "+" : ""}${escapeHtml(qty(diff))}${listPrice > 0 ? ` <span class="muted">(${diff > 0 ? "+" : ""}${escapeHtml(((diff / listPrice) * 100).toFixed(1))}%)</span>` : ""}`;
+      return `
+        <tr${hasClientPrice ? ' class="has-client-price"' : ""}>
+          <td>${escapeHtml(p.name)}${p.sku ? ` <span class="muted">(${escapeHtml(p.sku)})</span>` : ""}</td>
+          <td class="num">${escapeHtml(money(listPrice))}</td>
+          <td class="num"><input type="number" step="0.01" min="0" name="price_${p.id}" value="${clientPrice !== null ? escapeHtml(clientPrice.toFixed(2)) : ""}" placeholder="${escapeHtml(listPrice.toFixed(2))}" inputmode="decimal" aria-label="Client price for ${escapeHtml(p.name)}" class="client-price-input"></td>
+          <td class="num">${diffLabel}</td>
+          <td>${hasClientPrice ? `${escapeHtml(shortDate(p.updated_at))}${p.updated_by_name ? ` <span class="muted">· ${escapeHtml(p.updated_by_name)}</span>` : ""}` : '<span class="muted">Normal price</span>'}</td>
+        </tr>`;
+    })
+    .join("");
+  const clientPriceCount = pricesResult.rows.filter((p) => p.price_per_kg !== null).length;
+  const pricesSection = `
+    <section class="no-print client-prices">
+      <h2>Prices <span class="muted">· ${clientPriceCount ? `${escapeHtml(clientPriceCount)} client price${clientPriceCount === 1 ? "" : "s"}` : "normal prices"}</span></h2>
+      <p class="muted">Leave a client price empty to use the normal price. Changes apply to new orders only.</p>
+      ${
+        priceRows
+          ? `<form method="post" action="/clients/${client.id}/prices">
+              <div class="table-wrap">
+                <table class="data-table compact client-prices-table">
+                  <thead><tr><th>Product</th><th class="num">Normal price /kg</th><th class="num">Client price /kg</th><th class="num">Difference</th><th>Last changed</th></tr></thead>
+                  <tbody>${priceRows}</tbody>
+                </table>
+              </div>
+              <div class="actions"><button type="submit">Save prices</button></div>
+            </form>`
+          : '<p class="empty">No products yet.</p>'
+      }
+    </section>`;
+
   const margin = revenue - cost;
   const openDeliveries = counted.filter((o) => !["delivered", "returned"].includes(o.delivery_status || "not_shipped")).length;
   const lastOrder = counted[0]?.order_date;
@@ -3091,6 +3218,7 @@ app.get("/clients/:id", requireAuth, blockDriver, async (req, res) => {
         </form>
       </div>
       ${followUpSection}
+      ${pricesSection}
       ${
         productRows
           ? `<section>
@@ -3711,6 +3839,47 @@ app.post("/clients/:id/follow-ups", requireAuth, blockDriver, async (req, res) =
   );
   setFlash(req, `Follow-up added for ${isoDateLabel(r.rows[0].due_iso)}`);
   res.redirect(safeReturnTo(req.body.return_to, `/clients/${leadId}`));
+});
+
+app.post("/clients/:id/prices", requireAuth, blockDriver, async (req, res) => {
+  const leadId = parseInt(req.params.id, 10);
+  if (!leadId || !(await canAccessLead(req, leadId))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  const products = (await pool.query("SELECT id FROM products")).rows.map((r) => Number(r.id));
+  const existing = await loadClientPrices(leadId);
+  const client = await pool.connect();
+  let changed = 0;
+  try {
+    await client.query("BEGIN");
+    for (const productId of products) {
+      const field = req.body[`price_${productId}`];
+      if (field === undefined) continue;
+      const raw = String(field).trim();
+      const current = existing.get(productId);
+      if (raw === "") {
+        if (current !== undefined) {
+          await client.query("DELETE FROM client_prices WHERE lead_id = $1 AND product_id = $2", [leadId, productId]);
+          changed++;
+        }
+        continue;
+      }
+      const price = parseFloat(raw);
+      if (!Number.isFinite(price) || price < 0) continue;
+      if (current !== undefined && Math.abs(current - price) < 0.005) continue;
+      await saveClientPrice(client, leadId, productId, price, req.session.user!.id);
+      changed++;
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  setFlash(req, changed ? `Prices saved (${changed} change${changed === 1 ? "" : "s"})` : "No price changes");
+  res.redirect(`/clients/${leadId}`);
 });
 
 function csvRow(cells: (string | number | null)[]): string {

@@ -279,6 +279,17 @@ export async function initDb(): Promise<void> {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS client_prices (
+        lead_id INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        price_per_kg DECIMAL(12, 2) NOT NULL,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (lead_id, product_id)
+      )
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
     `);
     await client.query(`

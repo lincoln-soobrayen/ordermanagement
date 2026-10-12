@@ -211,6 +211,32 @@ document.addEventListener("DOMContentLoaded", () => {
       return products.find((p) => String(p.id) === String(id));
     }
 
+    function defaultPrice(product) {
+      return Number(product.client_price ?? product.selling_price ?? 0);
+    }
+
+    function updatePriceNote(row) {
+      const note = row.querySelector(".line-price-note");
+      if (!note) return;
+      const product = getProduct(row.querySelector(".line-product").value);
+      const priceInput = row.querySelector(".line-unit-price");
+      if (!product || isSampleCheckbox?.checked) {
+        note.textContent = "";
+        return;
+      }
+      const isClient = product.client_price !== null && product.client_price !== undefined;
+      const expected = defaultPrice(product);
+      const typed = parseFloat(priceInput.value);
+      const label = isClient ? "Client price" : "Normal price";
+      if (priceInput.value === "" || Math.abs(typed - expected) < 0.005) {
+        note.textContent = label;
+      } else {
+        note.textContent = `${label} is ${formatCurrency(expected)}`;
+      }
+    }
+
+    const saveClientPricesBox = document.getElementById("save-client-prices");
+
     function renderLine(line, index) {
       const clone = salesOrderLineTemplate.content.cloneNode(true);
       const row = clone.querySelector("tr");
@@ -232,8 +258,10 @@ document.addEventListener("DOMContentLoaded", () => {
       productSelect.addEventListener("change", () => {
         const product = getProduct(productSelect.value);
         const isSample = isSampleCheckbox?.checked;
-        if (product && !isSample && !priceInput.value) {
-          priceInput.value = Number(product.selling_price).toFixed(2);
+        const wasAutoFilled = priceInput.dataset.autoPrice && priceInput.value === priceInput.dataset.autoPrice;
+        if (product && !isSample && (!priceInput.value || wasAutoFilled)) {
+          priceInput.value = defaultPrice(product).toFixed(2);
+          priceInput.dataset.autoPrice = priceInput.value;
         }
         recalcRow(row);
       });
@@ -295,6 +323,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const price = parseFloat(priceInput.value) || 0;
       const total = kg * price;
       totalCell.textContent = formatCurrency(total);
+      updatePriceNote(row);
       updateTotals();
     }
 
@@ -336,11 +365,12 @@ document.addEventListener("DOMContentLoaded", () => {
             if (original) {
               priceInput.value = original;
             } else if (product) {
-              priceInput.value = Number(product.selling_price).toFixed(2);
+              priceInput.value = defaultPrice(product).toFixed(2);
             }
           }
           recalcRow(row);
         });
+        if (saveClientPricesBox) saveClientPricesBox.hidden = isSample;
       });
     }
 
@@ -360,7 +390,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!priceInput.value) {
           const productSelect = row.querySelector(".line-product");
           const product = getProduct(productSelect.value);
-          priceInput.dataset.originalPrice = product ? Number(product.selling_price).toFixed(2) : "";
+          priceInput.dataset.originalPrice = product ? defaultPrice(product).toFixed(2) : "";
         } else {
           priceInput.dataset.originalPrice = priceInput.value;
         }

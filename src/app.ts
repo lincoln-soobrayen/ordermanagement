@@ -2228,52 +2228,88 @@ app.get("/pos", requireAuth, async (req, res) => {
       "POS",
       `
       <div class="pos-page" id="pos-app" data-is-driver="${isDriver(req) ? "1" : "0"}">
-        <div class="pos-top">
-          <div class="pos-client-bar">
+        <header class="pos-header">
+          <div>
+            <h1>Point of sale</h1>
+            <p class="pos-subtitle" id="pos-subtitle">1. Choose a client · 2. Tap products · 3. Create order</p>
+          </div>
+        </header>
+
+        <div class="pos-toolbar">
+          <div class="pos-client-row">
             <label class="pos-client-select">
-              <span>Client</span>
+              <span>Selling to</span>
               <select id="pos-client" aria-label="Client">
-                <option value="">Select a client…</option>
+                <option value="">Choose a client…</option>
               </select>
             </label>
-            <button type="button" class="button secondary" id="pos-new-client-btn">+ New client</button>
+            <button type="button" class="button secondary pos-new-client-btn" id="pos-new-client-btn">+ New</button>
           </div>
           <form id="pos-new-client" class="pos-new-client" hidden>
-            <input type="text" name="name" placeholder="Contact name *" required>
-            <input type="text" name="company" placeholder="Company">
-            <input type="tel" name="phone" placeholder="Phone">
-            <button type="submit">Save client</button>
-            <button type="button" class="button secondary" id="pos-new-client-cancel">Cancel</button>
-          </form>
-          <input type="search" id="pos-search" class="pos-search" placeholder="Search products…" aria-label="Search products">
-        </div>
-        <div class="pos-grid" id="pos-grid"></div>
-        <aside class="pos-cart" id="pos-cart">
-          <div class="pos-cart-header">
-            <h2>Cart <span id="pos-cart-count" class="muted">0</span></h2>
-            <button type="button" class="button small secondary" id="pos-cart-toggle" aria-expanded="true">Hide</button>
-          </div>
-          <div class="pos-cart-body" id="pos-cart-body">
-            <p class="empty" id="pos-cart-empty">Tap a product to add it.</p>
-            <ul class="pos-cart-lines" id="pos-cart-lines"></ul>
-            <div class="pos-cart-total">
-              <span>Total</span>
-              <strong id="pos-cart-total">Rs 0.00</strong>
+            <p class="pos-new-client-title">New client</p>
+            <input type="text" name="name" placeholder="Contact name *" required autocomplete="name">
+            <input type="text" name="company" placeholder="Company / shop" autocomplete="organization">
+            <input type="tel" name="phone" placeholder="Phone" autocomplete="tel">
+            <div class="pos-new-client-actions">
+              <button type="submit">Save &amp; select</button>
+              <button type="button" class="button secondary" id="pos-new-client-cancel">Cancel</button>
             </div>
-            <label class="pos-field">Delivery address
-              <textarea id="pos-address" rows="2" placeholder="Optional"></textarea>
-            </label>
-            <label class="pos-field">Notes
-              <textarea id="pos-notes" rows="2" placeholder="Optional"></textarea>
-            </label>
-            <label class="pos-save-prices" id="pos-save-prices" hidden>
-              <input type="checkbox" id="pos-save-client-prices" value="1">
-              Save these prices as this client's prices for next time
-            </label>
-            <button type="button" class="button" id="pos-checkout" disabled>Create order</button>
-            <p class="pos-error muted" id="pos-error" hidden></p>
-          </div>
-        </aside>
+          </form>
+          <label class="pos-search-wrap">
+            <span class="visually-hidden">Search products</span>
+            <input type="search" id="pos-search" class="pos-search" placeholder="Search products…" autocomplete="off">
+          </label>
+          <p class="pos-banner" id="pos-banner" hidden></p>
+        </div>
+
+        <div class="pos-main">
+          <div class="pos-grid" id="pos-grid" aria-live="polite"></div>
+
+          <div class="pos-cart-backdrop" id="pos-cart-backdrop" hidden></div>
+          <aside class="pos-cart" id="pos-cart" aria-label="Cart">
+            <div class="pos-cart-header">
+              <div>
+                <h2>Cart</h2>
+                <p class="muted" id="pos-cart-summary">Empty</p>
+              </div>
+              <button type="button" class="button small secondary pos-cart-close" id="pos-cart-close" aria-label="Close cart">✕</button>
+            </div>
+            <div class="pos-cart-body" id="pos-cart-body">
+              <p class="pos-cart-empty" id="pos-cart-empty">Tap a product to add it to the cart.</p>
+              <ul class="pos-cart-lines" id="pos-cart-lines"></ul>
+            </div>
+            <div class="pos-cart-footer">
+              <details class="pos-details">
+                <summary>Delivery &amp; notes</summary>
+                <label class="pos-field">Delivery address
+                  <textarea id="pos-address" rows="2" placeholder="Optional"></textarea>
+                </label>
+                <label class="pos-field">Notes
+                  <textarea id="pos-notes" rows="2" placeholder="Optional"></textarea>
+                </label>
+                <label class="pos-save-prices" id="pos-save-prices" hidden>
+                  <input type="checkbox" id="pos-save-client-prices" value="1">
+                  Save these prices as this client's prices
+                </label>
+              </details>
+              <div class="pos-cart-total">
+                <span>Total</span>
+                <strong id="pos-cart-total">Rs 0.00</strong>
+              </div>
+              <button type="button" class="button pos-checkout-btn" id="pos-checkout" disabled>Create order</button>
+              <p class="pos-error" id="pos-error" hidden></p>
+            </div>
+          </aside>
+        </div>
+
+        <div class="pos-dock" id="pos-dock" hidden>
+          <button type="button" class="pos-dock-btn" id="pos-dock-open">
+            <span class="pos-dock-count" id="pos-cart-count">0</span>
+            <span class="pos-dock-label">View cart</span>
+            <strong class="pos-dock-total" id="pos-dock-total">Rs 0.00</strong>
+          </button>
+        </div>
+        <div class="pos-toast" id="pos-toast" hidden></div>
       </div>
       <script src="/pos.js"></script>`,
       req

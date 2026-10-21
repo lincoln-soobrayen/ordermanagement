@@ -5,6 +5,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, INACTIVE_CLIENT_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, syncInactiveClientFollowUps, Lead, Order, OrderItem, Product, User } from "./db";
 import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
+import { parseMultipart } from "./multipart";
 
 export const app = express();
 const SESSION_SECRET = process.env.SESSION_SECRET || "default-secret-change-me";
@@ -29,6 +30,7 @@ declare global {
 }
 
 app.use(requestPoolMiddleware);
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(
   session({
@@ -1899,9 +1901,10 @@ function usersTable(rows: Partial<User>[]): string {
     </table>`;
 }
 
+type ProductRow = Partial<Product> & { has_image?: boolean };
+
 app.get("/products", requireAuth, blockDriver, async (req, res) => {
   const { q } = req.query as { q?: string };
-  const admin = isAdmin(req);
   let where = "WHERE 1=1";
   const params: (string | undefined)[] = [];
   if (q) {
@@ -1910,7 +1913,9 @@ app.get("/products", requireAuth, blockDriver, async (req, res) => {
   }
 
   const result = await pool.query(
-    `SELECT id, name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton FROM products ${where} ORDER BY updated_at DESC`,
+    `SELECT id, name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton,
+            image_mime, (image_data IS NOT NULL) AS has_image
+     FROM products ${where} ORDER BY updated_at DESC`,
     params
   );
 
@@ -1940,7 +1945,7 @@ app.get("/products/new", requireAuth, blockDriver, (req, res) => {
       "New Product",
       `
       <h1>New Product</h1>
-      <form method="post" action="/products" class="form-grid">
+      <form method="post" action="/products" class="form-grid" enctype="multipart/form-data">
         ${productFormFields({})}
         <div class="actions">
           <button type="submit">Save Product</button>
@@ -1953,18 +1958,60 @@ app.get("/products/new", requireAuth, blockDriver, (req, res) => {
 });
 
 app.post("/products", requireAuth, blockDriver, async (req, res) => {
-  const { name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton } = req.body;
-  await pool.query(
-    "INSERT INTO products (name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    [name, sku || null, description || null, parseFloat(cost_price) || 0, parseFloat(selling_price) || 0, parseFloat(stock_kg) || 0, parseFloat(kg_per_sachet) || 1, parseFloat(sachets_per_carton) || 1]
+  try {
+    const { fields, file } = await parseMultipart(req);
+    const name = fields.name;
+    if (!name) {
+      setFlash(req, "Name is required", "error");
+      res.redirect("/products/new");
+      return;
+    }
+    const result = await pool.query(
+      `INSERT INTO products (name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton, image_mime, image_data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      [
+        name,
+        fields.sku || null,
+        fields.description || null,
+        parseFloat(fields.cost_price) || 0,
+        parseFloat(fields.selling_price) || 0,
+        parseFloat(fields.stock_kg) || 0,
+        parseFloat(fields.kg_per_sachet) || 1,
+        parseFloat(fields.sachets_per_carton) || 1,
+        file ? file.mime : null,
+        file ? file.buffer : null,
+      ]
+    );
+    setFlash(req, file ? "Product created with image" : "Product created");
+    res.redirect(`/products/${result.rows[0].id}/edit`);
+  } catch (err: any) {
+    setFlash(req, err?.message || "Failed to create product", "error");
+    res.redirect("/products/new");
+  }
+});
+
+app.get("/products/:id/image", requireAuth, async (req, res) => {
+  const result = await pool.query(
+    "SELECT image_mime, image_data FROM products WHERE id = $1 AND image_data IS NOT NULL",
+    [req.params.id]
   );
-  setFlash(req, "Product created");
-  res.redirect("/products");
+  const row = result.rows[0];
+  if (!row?.image_data) {
+    res.status(404).type("text/plain").send("No image");
+    return;
+  }
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.type(row.image_mime || "image/jpeg").send(row.image_data);
 });
 
 app.get("/products/:id/edit", requireAuth, blockDriver, async (req, res) => {
-  const result = await pool.query("SELECT * FROM products WHERE id = $1", [req.params.id]);
-  const product = result.rows[0] as Product | undefined;
+  const result = await pool.query(
+    `SELECT id, name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton,
+            image_mime, (image_data IS NOT NULL) AS has_image
+     FROM products WHERE id = $1`,
+    [req.params.id]
+  );
+  const product = result.rows[0] as ProductRow | undefined;
   if (!product) {
     res.status(404).send(renderPage("Not Found", "<h1>Product not found</h1>", req));
     return;
@@ -1974,7 +2021,7 @@ app.get("/products/:id/edit", requireAuth, blockDriver, async (req, res) => {
       "Edit Product",
       `
       <h1>Edit Product</h1>
-      <form method="post" action="/products/${escapeHtml(product.id)}/update" class="form-grid">
+      <form method="post" action="/products/${escapeHtml(product.id)}/update" class="form-grid" enctype="multipart/form-data">
         ${productFormFields(product)}
         <div class="actions">
           <button type="submit">Update Product</button>
@@ -1987,13 +2034,74 @@ app.get("/products/:id/edit", requireAuth, blockDriver, async (req, res) => {
 });
 
 app.post("/products/:id/update", requireAuth, blockDriver, async (req, res) => {
-  const { name, sku, description, cost_price, selling_price, stock_kg, kg_per_sachet, sachets_per_carton } = req.body;
-  await pool.query(
-    "UPDATE products SET name = $1, sku = $2, description = $3, cost_price = $4, selling_price = $5, stock_kg = $6, kg_per_sachet = $7, sachets_per_carton = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9",
-    [name, sku || null, description || null, parseFloat(cost_price) || 0, parseFloat(selling_price) || 0, parseFloat(stock_kg) || 0, parseFloat(kg_per_sachet) || 1, parseFloat(sachets_per_carton) || 1, req.params.id]
-  );
-  setFlash(req, "Product updated");
-  res.redirect("/products");
+  const productId = parseInt(req.params.id, 10);
+  try {
+    const { fields, file } = await parseMultipart(req);
+    const name = fields.name;
+    if (!name) {
+      setFlash(req, "Name is required", "error");
+      res.redirect(`/products/${productId}/edit`);
+      return;
+    }
+    if (fields.remove_image === "1" && !file) {
+      await pool.query(
+        `UPDATE products SET name = $1, sku = $2, description = $3, cost_price = $4, selling_price = $5,
+         stock_kg = $6, kg_per_sachet = $7, sachets_per_carton = $8, image_mime = NULL, image_data = NULL,
+         updated_at = CURRENT_TIMESTAMP WHERE id = $9`,
+        [
+          name,
+          fields.sku || null,
+          fields.description || null,
+          parseFloat(fields.cost_price) || 0,
+          parseFloat(fields.selling_price) || 0,
+          parseFloat(fields.stock_kg) || 0,
+          parseFloat(fields.kg_per_sachet) || 1,
+          parseFloat(fields.sachets_per_carton) || 1,
+          productId,
+        ]
+      );
+    } else if (file) {
+      await pool.query(
+        `UPDATE products SET name = $1, sku = $2, description = $3, cost_price = $4, selling_price = $5,
+         stock_kg = $6, kg_per_sachet = $7, sachets_per_carton = $8, image_mime = $9, image_data = $10,
+         updated_at = CURRENT_TIMESTAMP WHERE id = $11`,
+        [
+          name,
+          fields.sku || null,
+          fields.description || null,
+          parseFloat(fields.cost_price) || 0,
+          parseFloat(fields.selling_price) || 0,
+          parseFloat(fields.stock_kg) || 0,
+          parseFloat(fields.kg_per_sachet) || 1,
+          parseFloat(fields.sachets_per_carton) || 1,
+          file.mime,
+          file.buffer,
+          productId,
+        ]
+      );
+    } else {
+      await pool.query(
+        `UPDATE products SET name = $1, sku = $2, description = $3, cost_price = $4, selling_price = $5,
+         stock_kg = $6, kg_per_sachet = $7, sachets_per_carton = $8, updated_at = CURRENT_TIMESTAMP WHERE id = $9`,
+        [
+          name,
+          fields.sku || null,
+          fields.description || null,
+          parseFloat(fields.cost_price) || 0,
+          parseFloat(fields.selling_price) || 0,
+          parseFloat(fields.stock_kg) || 0,
+          parseFloat(fields.kg_per_sachet) || 1,
+          parseFloat(fields.sachets_per_carton) || 1,
+          productId,
+        ]
+      );
+    }
+    setFlash(req, "Product updated");
+    res.redirect("/products");
+  } catch (err: any) {
+    setFlash(req, err?.message || "Failed to update product", "error");
+    res.redirect(`/products/${productId}/edit`);
+  }
 });
 
 app.post("/products/:id/delete", requireAuth, blockDriver, requireAdmin, async (req, res) => {
@@ -2010,7 +2118,28 @@ app.post("/products/:id/delete", requireAuth, blockDriver, requireAdmin, async (
   res.redirect("/products");
 });
 
-function productFormFields(product: Partial<Product>): string {
+function productFormFields(product: ProductRow): string {
+  const hasImage = Boolean(product.has_image);
+  const imageBlock = product.id
+    ? `<div class="full product-image-field">
+        <label>Product image
+          <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
+        </label>
+        ${
+          hasImage
+            ? `<div class="product-image-preview">
+                <img src="/products/${product.id}/image" alt="" width="96" height="96">
+                <label class="inline-check"><input type="checkbox" name="remove_image" value="1"> Remove image</label>
+              </div>`
+            : `<p class="muted">JPEG, PNG or WebP, max 2MB. Shown in POS.</p>`
+        }
+      </div>`
+    : `<div class="full product-image-field">
+        <label>Product image
+          <input type="file" name="image" accept="image/jpeg,image/png,image/webp">
+        </label>
+        <p class="muted">JPEG, PNG or WebP, max 2MB. Shown in POS.</p>
+      </div>`;
   return `
     <label>Name *<input type="text" name="name" value="${escapeHtml(product.name)}" required></label>
     <label>SKU<input type="text" name="sku" value="${escapeHtml(product.sku)}"></label>
@@ -2031,18 +2160,19 @@ function productFormFields(product: Partial<Product>): string {
       product.sachets_per_carton ?? ""
     )}" required placeholder="e.g. 40"></label>
     <p class="full carton-hint" id="carton-hint">Enter stock, kg per sachet and sachets per carton to see total cartons.</p>
+    ${imageBlock}
     <label class="full">Description<textarea name="description" rows="4">${escapeHtml(
       product.description
     )}</textarea></label>
   `;
 }
 
-function productsTable(rows: Partial<Product>[], actions = false): string {
+function productsTable(rows: ProductRow[], actions = false): string {
   if (rows.length === 0) return "<p class=\"empty\">No products found.</p>";
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Name</th><th>SKU</th><th>Cost/kg</th><th>Selling/kg</th><th>Margin/kg</th><th>Stock (kg)</th><th>Kg/Sachet</th><th>Sachets/Carton</th><th>Sachets</th><th>Cartons</th><th>Description</th>${
+        <tr><th></th><th>Name</th><th>SKU</th><th>Cost/kg</th><th>Selling/kg</th><th>Margin/kg</th><th>Stock (kg)</th><th>Kg/Sachet</th><th>Sachets/Carton</th><th>Sachets</th><th>Cartons</th><th>Description</th>${
           actions ? "<th>Actions</th>" : ""
         }</tr>
       </thead>
@@ -2055,8 +2185,12 @@ function productsTable(rows: Partial<Product>[], actions = false): string {
               const sachetsPerCarton = (p.sachets_per_carton || 1) > 0 ? (p.sachets_per_carton || 1) : 1;
               const sachets = (p.stock_kg || 0) / kgPerSachet;
               const cartons = sachets / sachetsPerCarton;
+              const thumb = p.has_image
+                ? `<img class="product-thumb" src="/products/${p.id}/image" alt="" width="40" height="40">`
+                : `<span class="product-thumb placeholder">${escapeHtml((p.name || "?").charAt(0).toUpperCase())}</span>`;
               return `
           <tr>
+            <td class="product-thumb-cell">${thumb}</td>
             <td>${escapeHtml(p.name)}</td>
             <td>${escapeHtml(p.sku)}</td>
             <td>Rs ${escapeHtml(Number(p.cost_price || 0).toLocaleString())}</td>
@@ -2085,6 +2219,217 @@ function productsTable(rows: Partial<Product>[], actions = false): string {
       </tbody>
     </table>`;
 }
+
+// --- POS (all logged-in roles, including drivers) ---
+
+app.get("/pos", requireAuth, async (req, res) => {
+  res.send(
+    renderPage(
+      "POS",
+      `
+      <div class="pos-page" id="pos-app" data-is-driver="${isDriver(req) ? "1" : "0"}">
+        <div class="pos-top">
+          <div class="pos-client-bar">
+            <label class="pos-client-select">
+              <span>Client</span>
+              <select id="pos-client" aria-label="Client">
+                <option value="">Select a client…</option>
+              </select>
+            </label>
+            <button type="button" class="button secondary" id="pos-new-client-btn">+ New client</button>
+          </div>
+          <form id="pos-new-client" class="pos-new-client" hidden>
+            <input type="text" name="name" placeholder="Contact name *" required>
+            <input type="text" name="company" placeholder="Company">
+            <input type="tel" name="phone" placeholder="Phone">
+            <button type="submit">Save client</button>
+            <button type="button" class="button secondary" id="pos-new-client-cancel">Cancel</button>
+          </form>
+          <input type="search" id="pos-search" class="pos-search" placeholder="Search products…" aria-label="Search products">
+        </div>
+        <div class="pos-grid" id="pos-grid"></div>
+        <aside class="pos-cart" id="pos-cart">
+          <div class="pos-cart-header">
+            <h2>Cart <span id="pos-cart-count" class="muted">0</span></h2>
+            <button type="button" class="button small secondary" id="pos-cart-toggle" aria-expanded="true">Hide</button>
+          </div>
+          <div class="pos-cart-body" id="pos-cart-body">
+            <p class="empty" id="pos-cart-empty">Tap a product to add it.</p>
+            <ul class="pos-cart-lines" id="pos-cart-lines"></ul>
+            <div class="pos-cart-total">
+              <span>Total</span>
+              <strong id="pos-cart-total">Rs 0.00</strong>
+            </div>
+            <label class="pos-field">Delivery address
+              <textarea id="pos-address" rows="2" placeholder="Optional"></textarea>
+            </label>
+            <label class="pos-field">Notes
+              <textarea id="pos-notes" rows="2" placeholder="Optional"></textarea>
+            </label>
+            <label class="pos-save-prices" id="pos-save-prices" hidden>
+              <input type="checkbox" id="pos-save-client-prices" value="1">
+              Save these prices as this client's prices for next time
+            </label>
+            <button type="button" class="button" id="pos-checkout" disabled>Create order</button>
+            <p class="pos-error muted" id="pos-error" hidden></p>
+          </div>
+        </aside>
+      </div>
+      <script src="/pos.js"></script>`,
+      req
+    )
+  );
+});
+
+app.get("/pos/data", requireAuth, async (req, res) => {
+  const leadF = await leadFilter(req);
+  const leadId = parseInt(String(req.query.lead_id || ""), 10) || null;
+  if (leadId && !(await canAccessLead(req, leadId))) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+  const clients = await pool.query(
+    `SELECT id, name, company, phone, delivery_location
+     FROM leads WHERE 1=1${leadF.where}
+     ORDER BY COALESCE(company, name), name`,
+    leadF.params
+  );
+  const products = await pool.query(
+    `SELECT id, name, sku, selling_price, kg_per_sachet, sachets_per_carton,
+            (image_data IS NOT NULL) AS has_image
+     FROM products ORDER BY name`
+  );
+  const clientPrices = leadId ? await loadClientPrices(leadId) : new Map<number, number>();
+  res.json({
+    clients: clients.rows.map((c) => ({
+      id: c.id,
+      name: c.name,
+      company: c.company,
+      phone: c.phone,
+      delivery_location: c.delivery_location,
+      label: c.company ? `${c.company} (${c.name})` : c.name,
+    })),
+    products: products.rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      sku: p.sku,
+      selling_price: Number(p.selling_price || 0),
+      client_price: clientPrices.has(Number(p.id)) ? clientPrices.get(Number(p.id))! : null,
+      kg_per_sachet: Number(p.kg_per_sachet || 1),
+      sachets_per_carton: Number(p.sachets_per_carton || 1),
+      image_url: p.has_image ? `/products/${p.id}/image` : null,
+    })),
+  });
+});
+
+app.post("/pos/clients", requireAuth, async (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const company = String(req.body?.company || "").trim() || null;
+  const phone = String(req.body?.phone || "").trim() || null;
+  if (!name) {
+    res.status(400).json({ error: "Name is required" });
+    return;
+  }
+  const result = await pool.query(
+    `INSERT INTO leads (name, company, phone, status, assigned_to)
+     VALUES ($1, $2, $3, 'new', $4)
+     RETURNING id, name, company, phone, delivery_location`,
+    [name, company, phone, req.session.user!.id]
+  );
+  const c = result.rows[0];
+  res.status(201).json({
+    id: c.id,
+    name: c.name,
+    company: c.company,
+    phone: c.phone,
+    delivery_location: c.delivery_location,
+    label: c.company ? `${c.company} (${c.name})` : c.name,
+  });
+});
+
+app.post("/pos/checkout", requireAuth, async (req, res) => {
+  const leadId = parseInt(String(req.body?.lead_id || ""), 10);
+  if (!leadId) {
+    res.status(400).json({ error: "Select a client" });
+    return;
+  }
+  if (!(await canAccessLead(req, leadId))) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+  const rawLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  const lines: OrderLineInput[] = [];
+  for (const line of rawLines) {
+    const productId = parseInt(String(line.product_id || ""), 10);
+    if (!productId) continue;
+    const quantity_kg = parseFloat(line.quantity_kg) || 0;
+    const quantity_sachets = parseFloat(line.quantity_sachets) || 0;
+    const quantity_cartons = parseFloat(line.quantity_cartons) || 0;
+    const unit_price = parseFloat(line.unit_price) || 0;
+    if (quantity_kg <= 0 && quantity_sachets <= 0 && quantity_cartons <= 0) continue;
+    lines.push({
+      product_id: productId,
+      quantity_kg: quantity_kg || 0,
+      quantity_sachets: quantity_sachets || 0,
+      quantity_cartons: quantity_cartons || 0,
+      unit_price,
+    });
+  }
+  if (!lines.length) {
+    res.status(400).json({ error: "Add at least one product" });
+    return;
+  }
+  const delivery_address = String(req.body?.delivery_address || "").trim() || null;
+  const notes = String(req.body?.notes || "").trim() || null;
+  const savePrices = Boolean(req.body?.save_client_prices);
+  // Fake body flag for shared helper
+  (req as any).body = { ...(req.body || {}), save_client_prices: savePrices ? "1" : undefined };
+  const savePricesFor = await clientPricesTarget(req, String(leadId), false);
+  const customer_name = await customerNameFromLead(leadId);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const finalOrderValue = lines.reduce((sum, line) => sum + line.quantity_kg * line.unit_price, 0);
+    const userId = req.session.user!.id;
+    // Drivers only see deliveries assigned to them — assign themselves on POS sales.
+    const driverId = isDriver(req) ? userId : null;
+    const orderResult = await client.query(
+      `INSERT INTO orders (lead_id, user_id, driver_id, customer_name, order_value, status, order_date, delivery_status, delivery_address, delivery_date, notes)
+       VALUES ($1, $2, $3, $4, $5, 'order_placed', $6, 'not_shipped', $7, NULL, $8) RETURNING id`,
+      [
+        leadId,
+        userId,
+        driverId,
+        customer_name,
+        finalOrderValue,
+        new Date().toISOString().split("T")[0],
+        delivery_address,
+        notes,
+      ]
+    );
+    const orderId = orderResult.rows[0].id as number;
+    for (const line of lines) {
+      await client.query(
+        `INSERT INTO order_items (order_id, product_id, quantity_kg, quantity_sachets, quantity_cartons, unit_price, unit_cost)
+         VALUES ($1, $2, $3, $4, $5, $6, (SELECT cost_price FROM products WHERE id = $2))`,
+        [orderId, line.product_id, line.quantity_kg, line.quantity_sachets, line.quantity_cartons, line.unit_price]
+      );
+    }
+    const savedPrices = savePricesFor ? await saveChangedClientPrices(client, savePricesFor, lines, req.session.user!.id) : 0;
+    await client.query("COMMIT");
+    await closeFollowUpsForNewOrder(leadId, req.session.user!.id, false);
+    setFlash(req, `Order #${orderId} created${clientPricesFlash(savedPrices)}`);
+    res.json({
+      id: orderId,
+      redirect: isDriver(req) ? "/deliveries" : `/orders/${orderId}/edit`,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+});
 
 app.get("/reports", requireAuth, blockDriver, async (req, res) => {
   const leadF = await leadFilter(req);

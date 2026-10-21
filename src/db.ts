@@ -290,6 +290,12 @@ export async function initDb(): Promise<void> {
     `);
 
     await client.query(`
+      ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS image_mime VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS image_data BYTEA
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
     `);
     await client.query(`
@@ -544,6 +550,8 @@ export interface Product {
   stock_kg: number;
   kg_per_sachet: number;
   sachets_per_carton: number;
+  image_mime: string | null;
+  image_data?: Buffer | null;
   created_at: Date;
   updated_at: Date;
 }

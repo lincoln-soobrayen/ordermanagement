@@ -30,13 +30,17 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
 
 function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followUpsDue?: number): string {
   const baseItems: { href: string; icon: string; label: string; badge?: number }[] = isDriver
-    ? [{ href: "/deliveries", icon: "🚚", label: "Deliveries" }]
+    ? [
+        { href: "/pos", icon: "🛒", label: "POS" },
+        { href: "/deliveries", icon: "🚚", label: "Deliveries" },
+      ]
     : [
         { href: "/dashboard", icon: "⊞", label: "Dashboard" },
         { href: "/leads", icon: "👤", label: "Leads" },
         { href: "/clients", icon: "🏢", label: "Clients" },
         { href: "/follow-ups", icon: "📞", label: "Follow-ups", badge: followUpsDue },
         { href: "/orders", icon: "📦", label: "Orders" },
+        { href: "/pos", icon: "🛒", label: "POS" },
         { href: "/deliveries", icon: "🚚", label: "Deliveries" },
         { href: "/products", icon: "🛍", label: "Products" },
         ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),

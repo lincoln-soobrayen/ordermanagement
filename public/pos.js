@@ -2,9 +2,25 @@
   const root = document.getElementById("pos-app");
   if (!root) return;
 
-  const clientSelect = document.getElementById("pos-client");
+  const clientIdInput = document.getElementById("pos-client");
+  const clientSearch = document.getElementById("pos-client-search");
+  const clientList = document.getElementById("pos-client-list");
+  const clientClear = document.getElementById("pos-client-clear");
+  const clientCombo = document.getElementById("pos-client-combo");
   const grid = document.getElementById("pos-grid");
   const searchInput = document.getElementById("pos-search");
+
+  const clientSelect = {
+    get value() {
+      return clientIdInput?.value || "";
+    },
+    set value(v) {
+      if (clientIdInput) clientIdInput.value = v ? String(v) : "";
+    },
+    focus() {
+      clientSearch?.focus();
+    },
+  };
   const cartEl = document.getElementById("pos-cart");
   const cartBackdrop = document.getElementById("pos-cart-backdrop");
   const cartLinesEl = document.getElementById("pos-cart-lines");
@@ -25,8 +41,11 @@
   const savePricesWrap = document.getElementById("pos-save-prices");
   const savePricesCheck = document.getElementById("pos-save-client-prices");
   const newClientForm = document.getElementById("pos-new-client");
+  const newClientModal = document.getElementById("pos-new-client-modal");
   const newClientBtn = document.getElementById("pos-new-client-btn");
   const newClientCancel = document.getElementById("pos-new-client-cancel");
+  const newClientCancelBtn = document.getElementById("pos-new-client-cancel-btn");
+  const newClientBackdrop = document.getElementById("pos-new-client-backdrop");
   const toastEl = document.getElementById("pos-toast");
 
   let clients = [];
@@ -118,15 +137,19 @@
     return { total, units, lines: cart.length };
   }
 
+  function selectedClient() {
+    return clients.find((c) => String(c.id) === String(clientSelect.value));
+  }
+
   function updateBanner() {
     if (!bannerEl || !subtitleEl) return;
-    if (!clientSelect?.value) {
+    if (!clientSelect.value) {
       bannerEl.hidden = false;
       bannerEl.textContent = "Choose a client first, then tap products to add them.";
       bannerEl.className = "pos-banner is-warn";
       subtitleEl.textContent = "1. Choose a client · 2. Tap products · 3. Create order";
     } else {
-      const label = clientSelect.options[clientSelect.selectedIndex]?.text || "Client";
+      const label = selectedClient()?.label || "Client";
       bannerEl.hidden = true;
       subtitleEl.textContent = `Selling to ${label}`;
     }
@@ -140,19 +163,93 @@
     document.body.classList.toggle("pos-cart-open", open && window.matchMedia("(max-width: 900px)").matches);
   }
 
+  function clientMatches(client, q) {
+    if (!q) return true;
+    const hay = [client.label, client.name, client.company, client.phone]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return q.split(/\s+/).every((part) => hay.includes(part));
+  }
+
+  function renderClientList(query) {
+    if (!clientList) return;
+    const q = (query || "").trim().toLowerCase();
+    const list = clients.filter((c) => clientMatches(c, q)).slice(0, 80);
+    if (!list.length) {
+      clientList.innerHTML = `<li class="pos-client-empty">No clients match “${escapeHtml(query || "")}”</li>`;
+      return;
+    }
+    clientList.innerHTML = list
+      .map((c) => {
+        const selected = String(c.id) === String(clientSelect.value);
+        const meta = [c.phone, c.company && c.company !== c.name ? c.name : ""]
+          .filter(Boolean)
+          .join(" · ");
+        return `<li role="option" class="pos-client-option${selected ? " is-selected" : ""}" data-id="${c.id}" aria-selected="${selected ? "true" : "false"}">
+          <strong>${escapeHtml(c.label)}</strong>
+          ${meta ? `<span class="muted">${escapeHtml(meta)}</span>` : ""}
+        </li>`;
+      })
+      .join("");
+  }
+
+  function openClientList() {
+    if (!clientList || !clientSearch) return;
+    const selected = selectedClient();
+    const q = selected && clientSearch.value === selected.label ? "" : clientSearch.value;
+    renderClientList(q);
+    clientList.hidden = false;
+    clientSearch.setAttribute("aria-expanded", "true");
+    clientCombo?.classList.add("is-open");
+  }
+
+  function closeClientList() {
+    if (!clientList || !clientSearch) return;
+    clientList.hidden = true;
+    clientSearch.setAttribute("aria-expanded", "false");
+    clientCombo?.classList.remove("is-open");
+    const selected = selectedClient();
+    if (selected) clientSearch.value = selected.label;
+  }
+
+  async function onClientChosen(id) {
+    const prev = clientSelect.value;
+    clientSelect.value = id ? String(id) : "";
+    const selected = selectedClient();
+    if (clientSearch) clientSearch.value = selected ? selected.label : "";
+    if (clientClear) clientClear.hidden = !clientSelect.value;
+    if (savePricesWrap) savePricesWrap.hidden = !clientSelect.value;
+    closeClientList();
+    updateBanner();
+    if (selected?.delivery_location && addressEl && !addressEl.value) {
+      addressEl.value = selected.delivery_location;
+    }
+    if (String(prev) === String(clientSelect.value)) {
+      renderCart();
+      return;
+    }
+    try {
+      await loadData();
+    } catch (err) {
+      showError(err.message || "Failed to load prices");
+    }
+    renderCart();
+  }
+
   function fillClients(selectedId) {
-    if (!clientSelect) return;
-    const current = selectedId != null ? String(selectedId) : clientSelect.value;
-    clientSelect.innerHTML =
-      '<option value="">Choose a client…</option>' +
-      clients
-        .map(
-          (c) =>
-            `<option value="${c.id}"${String(c.id) === current ? " selected" : ""}>${escapeHtml(c.label)}</option>`
-        )
-        .join("");
+    if (selectedId != null && selectedId !== "") {
+      clientSelect.value = String(selectedId);
+    }
+    const selected = selectedClient();
+    const listOpen = clientList && !clientList.hidden;
+    if (clientSearch && !listOpen) {
+      clientSearch.value = selected ? selected.label : "";
+    }
+    if (clientClear) clientClear.hidden = !clientSelect.value;
     if (savePricesWrap) savePricesWrap.hidden = !clientSelect.value;
     updateBanner();
+    if (listOpen) openClientList();
   }
 
   function renderGrid() {
@@ -298,19 +395,66 @@
 
   searchInput?.addEventListener("input", () => renderGrid());
 
-  clientSelect?.addEventListener("change", async () => {
-    const selected = clients.find((c) => String(c.id) === clientSelect.value);
-    if (selected?.delivery_location && addressEl && !addressEl.value) {
-      addressEl.value = selected.delivery_location;
+  clientSearch?.addEventListener("focus", () => {
+    if (clientSelect.value && clientSearch.value === selectedClient()?.label) {
+      clientSearch.select();
     }
-    if (savePricesWrap) savePricesWrap.hidden = !clientSelect.value;
+    openClientList();
+  });
+  clientSearch?.addEventListener("input", () => {
+    // Typing clears the committed selection until they pick again
+    if (clientSelect.value) {
+      const selected = selectedClient();
+      if (selected && clientSearch.value !== selected.label) {
+        clientSelect.value = "";
+        if (clientClear) clientClear.hidden = true;
+        if (savePricesWrap) savePricesWrap.hidden = true;
+        updateBanner();
+        renderCart();
+      }
+    }
+    openClientList();
+  });
+  clientSearch?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeClientList();
+      clientSearch.blur();
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "Enter") {
+      const first = clientList?.querySelector(".pos-client-option");
+      if (e.key === "Enter" && first) {
+        e.preventDefault();
+        onClientChosen(first.getAttribute("data-id"));
+      } else if (e.key === "ArrowDown" && first) {
+        e.preventDefault();
+        first.focus?.();
+        openClientList();
+      }
+    }
+  });
+  clientList?.addEventListener("mousedown", (e) => {
+    // Prevent input blur before click registers
+    e.preventDefault();
+  });
+  clientList?.addEventListener("click", (e) => {
+    const opt = e.target.closest(".pos-client-option");
+    if (!opt) return;
+    onClientChosen(opt.getAttribute("data-id"));
+  });
+  clientClear?.addEventListener("click", () => {
+    clientSelect.value = "";
+    if (clientSearch) clientSearch.value = "";
+    if (clientClear) clientClear.hidden = true;
+    if (savePricesWrap) savePricesWrap.hidden = true;
     updateBanner();
-    try {
-      await loadData();
-    } catch (err) {
-      showError(err.message || "Failed to load prices");
-    }
     renderCart();
+    openClientList();
+    clientSearch?.focus();
+  });
+  document.addEventListener("click", (e) => {
+    if (!clientCombo?.contains(e.target)) closeClientList();
   });
 
   cartLinesEl?.addEventListener("input", (e) => {
@@ -354,17 +498,26 @@
     renderCart();
   });
 
-  newClientBtn?.addEventListener("click", () => {
-    if (newClientForm) {
-      newClientForm.hidden = false;
-      newClientForm.querySelector("input[name=name]")?.focus();
-    }
-  });
-  newClientCancel?.addEventListener("click", () => {
-    if (newClientForm) {
-      newClientForm.hidden = true;
-      newClientForm.reset();
-    }
+  function openNewClientModal() {
+    if (!newClientModal) return;
+    newClientModal.hidden = false;
+    document.body.classList.add("pos-modal-open");
+    window.setTimeout(() => newClientForm?.querySelector("input[name=name]")?.focus(), 30);
+  }
+
+  function closeNewClientModal() {
+    if (!newClientModal) return;
+    newClientModal.hidden = true;
+    document.body.classList.remove("pos-modal-open");
+    newClientForm?.reset();
+  }
+
+  newClientBtn?.addEventListener("click", openNewClientModal);
+  newClientCancel?.addEventListener("click", closeNewClientModal);
+  newClientCancelBtn?.addEventListener("click", closeNewClientModal);
+  newClientBackdrop?.addEventListener("click", closeNewClientModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && newClientModal && !newClientModal.hidden) closeNewClientModal();
   });
 
   newClientForm?.addEventListener("submit", async (e) => {
@@ -376,6 +529,8 @@
       company: String(form.get("company") || "").trim(),
       phone: String(form.get("phone") || "").trim(),
     };
+    const submitBtn = newClientForm.querySelector('button[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
     try {
       const res = await fetch("/pos/clients", {
         method: "POST",
@@ -387,13 +542,15 @@
       clients.push(data);
       clients.sort((a, b) => a.label.localeCompare(b.label));
       fillClients(data.id);
-      newClientForm.hidden = true;
-      newClientForm.reset();
+      closeNewClientModal();
       if (savePricesWrap) savePricesWrap.hidden = false;
       showToast(`Client ${data.label} ready`);
       await loadData();
     } catch (err) {
       showError(err.message || "Could not create client");
+      showToast(err.message || "Could not create client");
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
     }
   });
 

@@ -2237,24 +2237,17 @@ app.get("/pos", requireAuth, async (req, res) => {
 
         <div class="pos-toolbar">
           <div class="pos-client-row">
-            <label class="pos-client-select">
+            <div class="pos-client-select">
               <span>Selling to</span>
-              <select id="pos-client" aria-label="Client">
-                <option value="">Choose a client…</option>
-              </select>
-            </label>
+              <div class="pos-client-combo" id="pos-client-combo">
+                <input type="hidden" id="pos-client" value="">
+                <input type="search" id="pos-client-search" class="pos-client-search" placeholder="Search client by name, shop or phone…" autocomplete="off" aria-label="Search client" aria-autocomplete="list" aria-controls="pos-client-list" aria-expanded="false">
+                <button type="button" class="pos-client-clear" id="pos-client-clear" hidden aria-label="Clear client">✕</button>
+                <ul class="pos-client-list" id="pos-client-list" role="listbox" hidden></ul>
+              </div>
+            </div>
             <button type="button" class="button secondary pos-new-client-btn" id="pos-new-client-btn">+ New</button>
           </div>
-          <form id="pos-new-client" class="pos-new-client" hidden>
-            <p class="pos-new-client-title">New client</p>
-            <input type="text" name="name" placeholder="Contact name *" required autocomplete="name">
-            <input type="text" name="company" placeholder="Company / shop" autocomplete="organization">
-            <input type="tel" name="phone" placeholder="Phone" autocomplete="tel">
-            <div class="pos-new-client-actions">
-              <button type="submit">Save &amp; select</button>
-              <button type="button" class="button secondary" id="pos-new-client-cancel">Cancel</button>
-            </div>
-          </form>
           <label class="pos-search-wrap">
             <span class="visually-hidden">Search products</span>
             <input type="search" id="pos-search" class="pos-search" placeholder="Search products…" autocomplete="off">
@@ -2310,6 +2303,33 @@ app.get("/pos", requireAuth, async (req, res) => {
           </button>
         </div>
         <div class="pos-toast" id="pos-toast" hidden></div>
+
+        <div class="pos-modal" id="pos-new-client-modal" hidden>
+          <div class="pos-modal-backdrop" id="pos-new-client-backdrop"></div>
+          <div class="pos-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="pos-new-client-title">
+            <form id="pos-new-client" class="pos-new-client">
+              <div class="pos-modal-header">
+                <h2 id="pos-new-client-title">New client</h2>
+                <button type="button" class="pos-modal-close" id="pos-new-client-cancel" aria-label="Close">✕</button>
+              </div>
+              <div class="pos-modal-body">
+                <label>Contact name *
+                  <input type="text" name="name" placeholder="e.g. Roshan" required autocomplete="name">
+                </label>
+                <label>Company / shop
+                  <input type="text" name="company" placeholder="Optional" autocomplete="organization">
+                </label>
+                <label>Phone
+                  <input type="tel" name="phone" placeholder="Optional" autocomplete="tel">
+                </label>
+              </div>
+              <div class="pos-new-client-actions">
+                <button type="submit">Save &amp; select</button>
+                <button type="button" class="button secondary" id="pos-new-client-cancel-btn">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
       </div>
       <script src="/pos.js"></script>`,
       req

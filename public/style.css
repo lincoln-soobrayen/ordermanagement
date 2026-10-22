@@ -2109,11 +2109,98 @@ tr.is-expanded > td {
   color: var(--muted);
 }
 
-.pos-client-select select {
+.pos-client-combo {
+  position: relative;
+}
+
+.pos-client-search {
   width: 100%;
   min-height: 48px;
+  padding-right: 40px;
   font-size: 1rem;
   font-weight: 600;
+}
+
+.pos-client-clear {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  margin-top: -16px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.pos-client-clear:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.pos-client-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 25;
+  max-height: min(50vh, 360px);
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.pos-client-list[hidden] {
+  display: none;
+}
+
+.pos-client-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.pos-client-option strong {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pos-client-option .muted {
+  font-size: 0.8rem;
+}
+
+.pos-client-option:hover,
+.pos-client-option:focus {
+  background: var(--primary-soft);
+}
+
+.pos-client-option.is-selected {
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.pos-client-empty {
+  padding: 14px 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.pos-client-combo.is-open .pos-client-search {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
 }
 
 .pos-new-client-btn {
@@ -2121,30 +2208,110 @@ tr.is-expanded > td {
   white-space: nowrap;
 }
 
-.pos-new-client {
-  display: grid;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+.pos-modal[hidden] {
+  display: none;
 }
 
-.pos-new-client-title {
+.pos-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.pos-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(15 23 42 / 0.5);
+}
+
+.pos-modal-dialog {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 420px);
+  max-height: min(90vh, 640px);
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.pos-new-client {
+  display: flex;
+  flex-direction: column;
   margin: 0;
-  font-weight: 700;
+}
+
+.pos-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 0;
+}
+
+.pos-modal-header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.pos-modal-close {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.pos-modal-close:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.pos-modal-body {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.pos-modal-body label {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pos-modal-body input {
+  width: 100%;
+  min-height: 44px;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text);
 }
 
 .pos-new-client-actions {
   display: flex;
   gap: 8px;
+  padding: 0 16px 16px;
 }
 
 .pos-new-client-actions .button,
 .pos-new-client-actions button {
   flex: 1;
-  min-height: 44px;
+  min-height: 48px;
+}
+
+body.pos-modal-open {
+  overflow: hidden;
 }
 
 .pos-search-wrap {
@@ -2200,21 +2367,32 @@ tr.is-expanded > td {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
+  color: var(--text);
   text-align: left;
   cursor: pointer;
   box-shadow: var(--shadow-sm);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
+  /* Override global button styles (white text on primary). */
+  font: inherit;
+  font-weight: 400;
+  align-items: stretch;
+  justify-content: flex-start;
 }
 
 .pos-card:hover,
 .pos-card:focus-visible {
+  background: var(--surface);
+  color: var(--text);
   border-color: var(--primary);
   box-shadow: var(--shadow);
   outline: none;
+  transform: none;
 }
 
 .pos-card:active {
   transform: scale(0.985);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .pos-card.in-cart {
@@ -2273,9 +2451,11 @@ tr.is-expanded > td {
 }
 
 .pos-card-name {
+  display: block;
   font-weight: 700;
   font-size: 0.92rem;
   line-height: 1.25;
+  color: var(--text);
 }
 
 .pos-card-price {
@@ -2286,6 +2466,7 @@ tr.is-expanded > td {
   margin-top: auto;
   font-size: 0.95rem;
   font-weight: 700;
+  color: var(--text);
 }
 
 .pos-card-unit {

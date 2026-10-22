@@ -3,9 +3,10 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import type { Pool, PoolClient } from "pg";
 import { pool, requestPoolMiddleware, DEFAULT_FOLLOW_UP_DAYS, INACTIVE_CLIENT_DAYS, MAX_NO_ANSWER_ATTEMPTS, SAMPLE_ORDER_SQL, syncInactiveClientFollowUps, Lead, Order, OrderItem, Product, User } from "./db";
-import { authenticateUser, isAdmin, isDriver, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
+import { authenticateUser, isAdmin, isDriver, isPosOnly, homePathForRole, hashPassword, buildPasswordResetUrl, sendPasswordResetEmail, createPasswordResetToken, consumePasswordResetToken } from "./auth";
 import { page, escapeHtml, alertHtml, statusOptions } from "./views";
 import { parseMultipart } from "./multipart";
+import { buildReceiptPdf, receiptWhatsAppText, ReceiptData, ReceiptLine } from "./receiptPdf";
 
 export const app = express();
 const SESSION_SECRET = process.env.SESSION_SECRET || "default-secret-change-me";
@@ -47,7 +48,7 @@ app.use(
 );
 
 app.use(async (req, _res, next) => {
-  if (req.method !== "GET" || !req.session.user || isDriver(req) || req.path.includes("export")) {
+  if (req.method !== "GET" || !req.session.user || isDriver(req) || isPosOnly(req) || req.path.includes("export")) {
     next();
     return;
   }
@@ -63,6 +64,34 @@ app.use(async (req, _res, next) => {
     console.error("Follow-up count failed", err);
   }
   next();
+});
+
+/** POS-only users may only use the POS screen and its APIs. */
+function posOnlyAllowedPath(path: string): boolean {
+  if (path === "/pos" || path.startsWith("/pos/")) return true;
+  if (/^\/products\/\d+\/image$/.test(path)) return true;
+  if (path === "/logout") return true;
+  return false;
+}
+
+app.use((req, res, next) => {
+  if (!req.session.user || !isPosOnly(req)) {
+    next();
+    return;
+  }
+  if (posOnlyAllowedPath(req.path)) {
+    next();
+    return;
+  }
+  const wantsJson =
+    req.xhr ||
+    (req.headers.accept || "").includes("application/json") ||
+    (req.headers["content-type"] || "").includes("application/json");
+  if (wantsJson) {
+    res.status(403).json({ error: "This account can only use POS" });
+    return;
+  }
+  res.redirect("/pos");
 });
 
 function requireAuth(req: Request, res: Response, next: NextFunction): void {
@@ -84,7 +113,15 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 function renderPage(title: string, body: string, req: Request): string {
   const f = flash(req);
   const wrappedBody = `${f.message ? alertHtml(f.message, f.type) : ""}${body}`;
-  return page(title, wrappedBody, req.session.user?.name, isAdmin(req), isDriver(req), req.followUpsDue);
+  return page(
+    title,
+    wrappedBody,
+    req.session.user?.name,
+    isAdmin(req),
+    isDriver(req),
+    req.followUpsDue,
+    isPosOnly(req)
+  );
 }
 
 function requireDriverOnly(req: Request, res: Response, next: NextFunction): void {
@@ -109,7 +146,8 @@ interface FilterClause {
 }
 
 async function leadFilter(req: Request, alias: string = "leads"): Promise<FilterClause> {
-  if (isAdmin(req)) return { where: "", params: [] };
+  // POS counter users need the full client list to take walk-in orders.
+  if (isAdmin(req) || isPosOnly(req)) return { where: "", params: [] };
   return { where: ` AND ${alias}.assigned_to = $1`, params: [req.session.user!.id] };
 }
 
@@ -119,7 +157,7 @@ async function orderFilter(req: Request, alias: string = "orders"): Promise<Filt
 }
 
 async function canAccessLead(req: Request, leadId: number): Promise<boolean> {
-  if (isAdmin(req)) return true;
+  if (isAdmin(req) || isPosOnly(req)) return true;
   const result = await pool.query("SELECT 1 FROM leads WHERE id = $1 AND assigned_to = $2", [
     leadId,
     req.session.user!.id,
@@ -317,7 +355,7 @@ function setFlash(
 
 app.get("/login", (req, res) => {
   if (req.session.user) {
-    res.redirect("/dashboard");
+    res.redirect(homePathForRole(req.session.user.role));
     return;
   }
   const f = flash(req);
@@ -345,11 +383,7 @@ app.post("/login", async (req, res) => {
   const user = await authenticateUser(email, password);
   if (user) {
     req.session.user = user;
-    if (user.role === "driver") {
-      res.redirect("/deliveries");
-    } else {
-      res.redirect("/dashboard");
-    }
+    res.redirect(homePathForRole(user.role));
   } else {
     setFlash(req, "Invalid email or password", "error");
     res.redirect("/login");
@@ -364,7 +398,7 @@ app.post("/logout", (req, res) => {
 
 app.get("/forgot-password", (req, res) => {
   if (req.session.user) {
-    res.redirect("/dashboard");
+    res.redirect(homePathForRole(req.session.user.role));
     return;
   }
   res.send(
@@ -1756,10 +1790,11 @@ app.get("/users/new", requireAuth, blockDriver, requireAdmin, (req, res) => {
 
 app.post("/users", requireAuth, blockDriver, requireAdmin, async (req, res) => {
   const { name, email, password, role, is_active } = req.body;
+  const safeRole = USER_ROLES.some((r) => r.value === role) ? role : "salesperson";
   const hash = await hashPassword(password);
   await pool.query(
     "INSERT INTO users (name, email, password_hash, role, is_active) VALUES ($1, $2, $3, $4, $5)",
-    [name, email, hash, role || "salesperson", is_active === "on"]
+    [name, email, hash, safeRole, is_active === "on"]
   );
   setFlash(req, "User created");
   res.redirect("/users");
@@ -1809,7 +1844,7 @@ app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req
     fields.push(`password_hash = $${paramIndex++}`);
     updates.push(hash);
   }
-  if (role) {
+  if (role && USER_ROLES.some((r) => r.value === role)) {
     fields.push(`role = $${paramIndex++}`);
     updates.push(role);
   }
@@ -1856,13 +1891,28 @@ app.post("/users/:id/delete", requireAuth, blockDriver, requireAdmin, async (req
   res.redirect("/users");
 });
 
+const USER_ROLES: { value: string; label: string }[] = [
+  { value: "admin", label: "Admin" },
+  { value: "salesperson", label: "Salesperson" },
+  { value: "driver", label: "Driver" },
+  { value: "pos", label: "POS only" },
+];
+
+function roleLabel(role: string | undefined): string {
+  if (!role) return "";
+  return USER_ROLES.find((r) => r.value === role)?.label || role.charAt(0).toUpperCase() + role.slice(1);
+}
+
 function userFormFields(user: Partial<User>): string {
-  const roles = ["admin", "salesperson", "driver"];
+  const roleOptions = USER_ROLES.map(
+    (r) =>
+      `<option value="${escapeHtml(r.value)}" ${user.role === r.value ? "selected" : ""}>${escapeHtml(r.label)}</option>`
+  ).join("");
   return `
     <label>Name * <input type="text" name="name" value="${escapeHtml(user.name)}" required></label>
     <label>Email * <input type="email" name="email" value="${escapeHtml(user.email)}" required></label>
     <label>Password ${user.id ? "(leave blank to keep unchanged)" : "*"}<input type="password" name="password" ${user.id ? "" : "required"}></label>
-    <label>Role *<select name="role" required>${statusOptions(user.role || "", roles)}</select></label>
+    <label>Role *<select name="role" required>${roleOptions}</select></label>
     <label class="full">
       <input type="checkbox" name="is_active" ${user.is_active !== false ? "checked" : ""}> Active
     </label>
@@ -1883,7 +1933,7 @@ function usersTable(rows: Partial<User>[]): string {
           <tr>
             <td>${escapeHtml(u.name)}</td>
             <td>${escapeHtml(u.email)}</td>
-            <td>${escapeHtml(u.role ? u.role.charAt(0).toUpperCase() + u.role.slice(1) : "")}</td>
+            <td>${escapeHtml(roleLabel(u.role))}</td>
             <td>${escapeHtml(u.is_active ? "Active" : "Inactive")}</td>
             <td class="actions">
               <a href="/users/${u.id}/edit" class="button small">Edit</a>
@@ -2228,52 +2278,53 @@ app.get("/pos", requireAuth, async (req, res) => {
       "POS",
       `
       <div class="pos-page" id="pos-app" data-is-driver="${isDriver(req) ? "1" : "0"}">
-        <header class="pos-header">
-          <div>
-            <h1>Point of sale</h1>
-            <p class="pos-subtitle" id="pos-subtitle">1. Choose a client · 2. Tap products · 3. Create order</p>
-          </div>
-        </header>
-
         <div class="pos-toolbar">
-          <div class="pos-client-row">
-            <div class="pos-client-select">
-              <span>Selling to</span>
-              <div class="pos-client-combo" id="pos-client-combo">
-                <input type="hidden" id="pos-client" value="">
-                <input type="search" id="pos-client-search" class="pos-client-search" placeholder="Search client by name, shop or phone…" autocomplete="off" aria-label="Search client" aria-autocomplete="list" aria-controls="pos-client-list" aria-expanded="false">
-                <button type="button" class="pos-client-clear" id="pos-client-clear" hidden aria-label="Clear client">✕</button>
-                <ul class="pos-client-list" id="pos-client-list" role="listbox" hidden></ul>
-              </div>
+          <div class="pos-client-select">
+            <span>Client</span>
+            <div class="pos-client-combo" id="pos-client-combo">
+              <input type="hidden" id="pos-client" value="">
+              <input type="search" id="pos-client-search" class="pos-client-search" placeholder="Type to find a client…" autocomplete="off" aria-label="Search client" aria-autocomplete="list" aria-controls="pos-client-list" aria-expanded="false">
+              <button type="button" class="pos-client-clear" id="pos-client-clear" hidden aria-label="Clear client">✕</button>
+              <ul class="pos-client-list" id="pos-client-list" role="listbox" hidden></ul>
             </div>
-            <button type="button" class="button secondary pos-new-client-btn" id="pos-new-client-btn">+ New</button>
           </div>
+          <button type="button" class="button secondary pos-new-client-btn" id="pos-new-client-btn">+ New client</button>
           <label class="pos-search-wrap">
             <span class="visually-hidden">Search products</span>
-            <input type="search" id="pos-search" class="pos-search" placeholder="Search products…" autocomplete="off">
+            <input type="search" id="pos-search" class="pos-search" placeholder="Filter products…" autocomplete="off">
           </label>
-          <p class="pos-banner" id="pos-banner" hidden></p>
         </div>
+        <p class="pos-status" id="pos-subtitle">Pick a client, then add products</p>
 
         <div class="pos-main">
-          <div class="pos-grid" id="pos-grid" aria-live="polite"></div>
+          <section class="pos-products" aria-label="Products">
+            <div class="pos-grid" id="pos-grid" aria-live="polite"></div>
+          </section>
 
           <div class="pos-cart-backdrop" id="pos-cart-backdrop" hidden></div>
           <aside class="pos-cart" id="pos-cart" aria-label="Cart">
             <div class="pos-cart-header">
               <div>
                 <h2>Cart</h2>
-                <p class="muted" id="pos-cart-summary">Empty</p>
+                <p class="muted" id="pos-cart-summary">No items yet</p>
               </div>
               <button type="button" class="button small secondary pos-cart-close" id="pos-cart-close" aria-label="Close cart">✕</button>
             </div>
             <div class="pos-cart-body" id="pos-cart-body">
-              <p class="pos-cart-empty" id="pos-cart-empty">Tap a product to add it to the cart.</p>
+              <p class="pos-cart-empty" id="pos-cart-empty">Products you add will show up here.</p>
               <ul class="pos-cart-lines" id="pos-cart-lines"></ul>
             </div>
             <div class="pos-cart-footer">
               <details class="pos-details">
-                <summary>Delivery &amp; notes</summary>
+                <summary>Delivery &amp; notes <span class="muted">(optional)</span></summary>
+                <label class="pos-later" id="pos-later-wrap">
+                  <input type="checkbox" id="pos-deliver-later" value="1">
+                  Deliver later
+                </label>
+                <label class="pos-field" id="pos-delivery-date-wrap" hidden>Delivery date
+                  <input type="date" id="pos-delivery-date" class="pos-delivery-date">
+                </label>
+                <p class="pos-date-hint muted" id="pos-date-hint">Same-day delivery — date set to today</p>
                 <label class="pos-field">Delivery address
                   <textarea id="pos-address" rows="2" placeholder="Optional"></textarea>
                 </label>
@@ -2328,6 +2379,25 @@ app.get("/pos", requireAuth, async (req, res) => {
                 <button type="button" class="button secondary" id="pos-new-client-cancel-btn">Cancel</button>
               </div>
             </form>
+          </div>
+        </div>
+
+        <div class="pos-modal" id="pos-receipt-modal" hidden>
+          <div class="pos-modal-backdrop" id="pos-receipt-backdrop"></div>
+          <div class="pos-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="pos-receipt-title">
+            <div class="pos-modal-header">
+              <h2 id="pos-receipt-title">Order created</h2>
+              <button type="button" class="pos-modal-close" id="pos-receipt-close" aria-label="Close">✕</button>
+            </div>
+            <div class="pos-modal-body">
+              <p class="pos-receipt-msg" id="pos-receipt-msg">Receipt ready.</p>
+              <p class="muted pos-receipt-hint">On a phone or tablet, <strong>Send on WhatsApp</strong> opens the share sheet so you can attach the PDF. Otherwise the PDF downloads and WhatsApp opens with the order text.</p>
+            </div>
+            <div class="pos-new-client-actions pos-receipt-actions">
+              <button type="button" class="button" id="pos-receipt-whatsapp">Send on WhatsApp</button>
+              <a class="button secondary" id="pos-receipt-download" href="#" download>Download PDF</a>
+              <button type="button" class="button secondary" id="pos-receipt-done">New sale</button>
+            </div>
           </div>
         </div>
       </div>
@@ -2437,6 +2507,13 @@ app.post("/pos/checkout", requireAuth, async (req, res) => {
   }
   const delivery_address = String(req.body?.delivery_address || "").trim() || null;
   const notes = String(req.body?.notes || "").trim() || null;
+  const todayIso = new Date().toISOString().split("T")[0];
+  const rawDeliveryDate = String(req.body?.delivery_date || "").trim();
+  // Same-day when omitted/invalid; otherwise the chosen later date (YYYY-MM-DD).
+  let delivery_date = todayIso;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rawDeliveryDate)) {
+    delivery_date = rawDeliveryDate;
+  }
   const savePrices = Boolean(req.body?.save_client_prices);
   // Fake body flag for shared helper
   (req as any).body = { ...(req.body || {}), save_client_prices: savePrices ? "1" : undefined };
@@ -2451,15 +2528,16 @@ app.post("/pos/checkout", requireAuth, async (req, res) => {
     const driverId = isDriver(req) ? userId : null;
     const orderResult = await client.query(
       `INSERT INTO orders (lead_id, user_id, driver_id, customer_name, order_value, status, order_date, delivery_status, delivery_address, delivery_date, notes)
-       VALUES ($1, $2, $3, $4, $5, 'order_placed', $6, 'not_shipped', $7, NULL, $8) RETURNING id`,
+       VALUES ($1, $2, $3, $4, $5, 'order_placed', $6, 'not_shipped', $7, $8, $9) RETURNING id`,
       [
         leadId,
         userId,
         driverId,
         customer_name,
         finalOrderValue,
-        new Date().toISOString().split("T")[0],
+        todayIso,
         delivery_address,
+        delivery_date,
         notes,
       ]
     );
@@ -2475,9 +2553,20 @@ app.post("/pos/checkout", requireAuth, async (req, res) => {
     await client.query("COMMIT");
     await closeFollowUpsForNewOrder(leadId, req.session.user!.id, false);
     setFlash(req, `Order #${orderId} created${clientPricesFlash(savedPrices)}`);
+
+    const receiptData = await loadReceiptData(orderId);
+    const waDigits = receiptData
+      ? phoneParts(receiptData.phone)
+          .map((p) => whatsappNumber(p))
+          .find(Boolean)
+      : null;
+
     res.json({
       id: orderId,
-      redirect: isDriver(req) ? "/deliveries" : `/orders/${orderId}/edit`,
+      receipt_url: `/pos/orders/${orderId}/receipt.pdf`,
+      whatsapp_text: receiptData ? receiptWhatsAppText(receiptData) : `*Order #${orderId}*`,
+      whatsapp_phone: waDigits || null,
+      redirect: isDriver(req) ? "/deliveries" : isPosOnly(req) ? "/pos" : `/orders/${orderId}/edit`,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -2485,6 +2574,67 @@ app.post("/pos/checkout", requireAuth, async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+async function loadReceiptData(orderId: number): Promise<ReceiptData | null> {
+  const orderResult = await pool.query(
+    `SELECT o.id, o.order_date, o.delivery_date, o.customer_name, o.delivery_address, o.notes, o.order_value,
+            l.company, l.phone, u.name AS seller_name
+     FROM orders o
+     LEFT JOIN leads l ON l.id = o.lead_id
+     LEFT JOIN users u ON u.id = o.user_id
+     WHERE o.id = $1`,
+    [orderId]
+  );
+  const order = orderResult.rows[0];
+  if (!order) return null;
+  const items = await pool.query(
+    `SELECT p.name, p.sku, oi.quantity_kg, oi.quantity_sachets, oi.quantity_cartons, oi.unit_price
+     FROM order_items oi
+     JOIN products p ON p.id = oi.product_id
+     WHERE oi.order_id = $1
+     ORDER BY oi.id`,
+    [orderId]
+  );
+  return {
+    orderId: Number(order.id),
+    orderDate: order.order_date,
+    deliveryDate: order.delivery_date,
+    customerName: order.customer_name || "—",
+    company: order.company,
+    phone: order.phone,
+    deliveryAddress: order.delivery_address,
+    notes: order.notes,
+    lines: items.rows.map(
+      (r): ReceiptLine => ({
+        name: r.name,
+        sku: r.sku,
+        quantity_kg: Number(r.quantity_kg || 0),
+        quantity_sachets: Number(r.quantity_sachets || 0),
+        quantity_cartons: Number(r.quantity_cartons || 0),
+        unit_price: Number(r.unit_price || 0),
+      })
+    ),
+    total: Number(order.order_value || 0),
+    sellerName: order.seller_name,
+  };
+}
+
+app.get("/pos/orders/:id/receipt.pdf", requireAuth, async (req, res) => {
+  const orderId = parseInt(req.params.id, 10);
+  if (!orderId || !(await canAccessOrder(req, orderId))) {
+    res.status(404).send("Receipt not found");
+    return;
+  }
+  const data = await loadReceiptData(orderId);
+  if (!data) {
+    res.status(404).send("Receipt not found");
+    return;
+  }
+  const pdf = await buildReceiptPdf(data);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="receipt-${orderId}.pdf"`);
+  res.send(Buffer.from(pdf));
 });
 
 app.get("/reports", requireAuth, blockDriver, async (req, res) => {

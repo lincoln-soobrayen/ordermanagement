@@ -40,6 +40,17 @@ export function isDriver(req: Request): boolean {
   return req.session.user?.role === "driver";
 }
 
+/** Counter / kiosk user: POS only, no CRM access. */
+export function isPosOnly(req: Request): boolean {
+  return req.session.user?.role === "pos";
+}
+
+export function homePathForRole(role: string | undefined): string {
+  if (role === "driver") return "/deliveries";
+  if (role === "pos") return "/pos";
+  return "/dashboard";
+}
+
 export function generatePasswordResetToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }

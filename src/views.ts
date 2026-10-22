@@ -1,4 +1,12 @@
-export function page(title: string, body: string, userName?: string, isAdmin: boolean = false, isDriver: boolean = false, followUpsDue?: number): string {
+export function page(
+  title: string,
+  body: string,
+  userName?: string,
+  isAdmin: boolean = false,
+  isDriver: boolean = false,
+  followUpsDue?: number,
+  isPosOnly: boolean = false
+): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -16,7 +24,7 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  ${userName ? sideMenu(userName, isAdmin, isDriver, followUpsDue) : ""}
+  ${userName ? sideMenu(userName, isAdmin, isDriver, followUpsDue, isPosOnly) : ""}
   <div class="app-shell ${userName ? "with-sidebar" : ""}">
     ${userName ? "" : `<header class="site-header"><div class="container"><a href="/" class="logo">Leads & Orders</a></div></header>`}
     <main class="main-content">
@@ -28,23 +36,31 @@ export function page(title: string, body: string, userName?: string, isAdmin: bo
 </html>`;
 }
 
-function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followUpsDue?: number): string {
-  const baseItems: { href: string; icon: string; label: string; badge?: number }[] = isDriver
-    ? [
-        { href: "/pos", icon: "🛒", label: "POS" },
-        { href: "/deliveries", icon: "🚚", label: "Deliveries" },
-      ]
-    : [
-        { href: "/dashboard", icon: "⊞", label: "Dashboard" },
-        { href: "/leads", icon: "👤", label: "Leads" },
-        { href: "/clients", icon: "🏢", label: "Clients" },
-        { href: "/follow-ups", icon: "📞", label: "Follow-ups", badge: followUpsDue },
-        { href: "/orders", icon: "📦", label: "Orders" },
-        { href: "/pos", icon: "🛒", label: "POS" },
-        { href: "/deliveries", icon: "🚚", label: "Deliveries" },
-        { href: "/products", icon: "🛍", label: "Products" },
-        ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
-      ];
+function sideMenu(
+  userName: string,
+  isAdmin: boolean,
+  isDriver: boolean,
+  followUpsDue?: number,
+  isPosOnly: boolean = false
+): string {
+  const baseItems: { href: string; icon: string; label: string; badge?: number }[] = isPosOnly
+    ? [{ href: "/pos", icon: "🛒", label: "POS" }]
+    : isDriver
+      ? [
+          { href: "/pos", icon: "🛒", label: "POS" },
+          { href: "/deliveries", icon: "🚚", label: "Deliveries" },
+        ]
+      : [
+          { href: "/dashboard", icon: "⊞", label: "Dashboard" },
+          { href: "/leads", icon: "👤", label: "Leads" },
+          { href: "/clients", icon: "🏢", label: "Clients" },
+          { href: "/follow-ups", icon: "📞", label: "Follow-ups", badge: followUpsDue },
+          { href: "/orders", icon: "📦", label: "Orders" },
+          { href: "/pos", icon: "🛒", label: "POS" },
+          { href: "/deliveries", icon: "🚚", label: "Deliveries" },
+          { href: "/products", icon: "🛍", label: "Products" },
+          ...(isAdmin ? [{ href: "/users", icon: "⚙", label: "Users" }] : []),
+        ];
 
   const renderItem = (i: { href: string; icon: string; label: string; badge?: number }) => `
     <a href="${i.href}" class="sidebar-link" data-match="${i.href}">
@@ -54,7 +70,9 @@ function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followU
     </a>
   `;
 
-  const reportsMenu = `
+  const reportsMenu = isPosOnly
+    ? ""
+    : `
     <div class="sidebar-group">
       <a href="/reports" class="sidebar-link" data-match="/reports">
         <span class="sidebar-icon">📊</span>
@@ -70,10 +88,12 @@ function sideMenu(userName: string, isAdmin: boolean, isDriver: boolean, followU
     </div>
   `;
 
+  const homeHref = isPosOnly ? "/pos" : isDriver ? "/deliveries" : "/";
+
   return `
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
-      <a href="/" class="logo">Leads & Orders</a>
+      <a href="${homeHref}" class="logo">Leads & Orders</a>
       <button type="button" class="sidebar-close" id="sidebar-close" aria-label="Close menu">✕</button>
     </div>
     <nav class="sidebar-nav">

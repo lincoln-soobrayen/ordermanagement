@@ -334,18 +334,18 @@ export async function initDb(): Promise<void> {
       DO $$
       BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_user_role' AND conrelid = 'users'::regclass) THEN
-          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver'));
+          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver', 'pos'));
         END IF;
       END $$;
     `);
 
-    // Widen existing role constraint if it only allows admin/salesperson
+    // Widen existing role constraint when new roles are added
     await client.query(`
       DO $$
       BEGIN
         IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'valid_user_role' AND conrelid = 'users'::regclass) THEN
           ALTER TABLE users DROP CONSTRAINT valid_user_role;
-          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver'));
+          ALTER TABLE users ADD CONSTRAINT valid_user_role CHECK (role IN ('admin', 'salesperson', 'driver', 'pos'));
         END IF;
       END $$;
     `);

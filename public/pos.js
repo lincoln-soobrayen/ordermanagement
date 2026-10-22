@@ -34,10 +34,13 @@
   const cartClose = document.getElementById("pos-cart-close");
   const checkoutBtn = document.getElementById("pos-checkout");
   const errorEl = document.getElementById("pos-error");
-  const bannerEl = document.getElementById("pos-banner");
   const subtitleEl = document.getElementById("pos-subtitle");
   const addressEl = document.getElementById("pos-address");
   const notesEl = document.getElementById("pos-notes");
+  const deliverLaterEl = document.getElementById("pos-deliver-later");
+  const deliveryDateEl = document.getElementById("pos-delivery-date");
+  const deliveryDateWrap = document.getElementById("pos-delivery-date-wrap");
+  const dateHintEl = document.getElementById("pos-date-hint");
   const savePricesWrap = document.getElementById("pos-save-prices");
   const savePricesCheck = document.getElementById("pos-save-client-prices");
   const newClientForm = document.getElementById("pos-new-client");
@@ -47,6 +50,16 @@
   const newClientCancelBtn = document.getElementById("pos-new-client-cancel-btn");
   const newClientBackdrop = document.getElementById("pos-new-client-backdrop");
   const toastEl = document.getElementById("pos-toast");
+  const receiptModal = document.getElementById("pos-receipt-modal");
+  const receiptMsg = document.getElementById("pos-receipt-msg");
+  const receiptWhatsappBtn = document.getElementById("pos-receipt-whatsapp");
+  const receiptDownload = document.getElementById("pos-receipt-download");
+  const receiptDone = document.getElementById("pos-receipt-done");
+  const receiptClose = document.getElementById("pos-receipt-close");
+  const receiptBackdrop = document.getElementById("pos-receipt-backdrop");
+
+  /** @type {{ id: number, receipt_url: string, whatsapp_text: string, whatsapp_phone: string|null } | null} */
+  let lastReceipt = null;
 
   let clients = [];
   let products = [];
@@ -57,6 +70,45 @@
 
   function money(n) {
     return "Rs " + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function todayIsoLocal() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function tomorrowIsoLocal() {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function syncDeliveryDateUi() {
+    const later = Boolean(deliverLaterEl?.checked);
+    if (deliveryDateWrap) deliveryDateWrap.hidden = !later;
+    if (dateHintEl) dateHintEl.hidden = later;
+    if (deliveryDateEl) {
+      const minLater = tomorrowIsoLocal();
+      deliveryDateEl.min = minLater;
+      if (later) {
+        if (!deliveryDateEl.value || deliveryDateEl.value <= todayIsoLocal()) {
+          deliveryDateEl.value = minLater;
+        }
+      }
+    }
+  }
+
+  function selectedDeliveryDate() {
+    if (deliverLaterEl?.checked && deliveryDateEl?.value) {
+      return deliveryDateEl.value;
+    }
+    return todayIsoLocal();
   }
 
   function escapeHtml(str) {
@@ -142,16 +194,13 @@
   }
 
   function updateBanner() {
-    if (!bannerEl || !subtitleEl) return;
+    if (!subtitleEl) return;
     if (!clientSelect.value) {
-      bannerEl.hidden = false;
-      bannerEl.textContent = "Choose a client first, then tap products to add them.";
-      bannerEl.className = "pos-banner is-warn";
-      subtitleEl.textContent = "1. Choose a client · 2. Tap products · 3. Create order";
+      subtitleEl.textContent = "Pick a client, then add products";
+      subtitleEl.classList.remove("has-client");
     } else {
-      const label = selectedClient()?.label || "Client";
-      bannerEl.hidden = true;
-      subtitleEl.textContent = `Selling to ${label}`;
+      subtitleEl.textContent = `Selling to ${selectedClient()?.label || "client"}`;
+      subtitleEl.classList.add("has-client");
     }
   }
 
@@ -271,15 +320,18 @@
         const img = p.image_url
           ? `<img src="${escapeHtml(p.image_url)}" alt="" loading="lazy">`
           : `<span class="pos-card-placeholder">${escapeHtml((p.name || "?").charAt(0).toUpperCase())}</span>`;
+        const qtyLabel = qty ? (qty % 1 ? qty.toFixed(1) : String(qty)) : "";
         return `<button type="button" class="pos-card${qty ? " in-cart" : ""}" data-product-id="${p.id}">
-          <span class="pos-card-img">${img}${qty ? `<span class="pos-card-badge">${qty % 1 ? qty.toFixed(1) : qty}</span>` : ""}</span>
+          <span class="pos-card-img">${img}</span>
           <span class="pos-card-body">
             <span class="pos-card-name">${escapeHtml(p.name)}</span>
-            <span class="pos-card-price">${money(price)}<span class="pos-card-unit">/kg</span>${
-              isClient ? '<span class="pos-card-tag">Client price</span>' : ""
-            }</span>
+            <span class="pos-card-meta">
+              <span class="pos-card-price">${money(price)}<span class="pos-card-unit">/kg</span></span>
+              ${isClient ? '<span class="pos-card-tag">Client price</span>' : ""}
+              ${qty ? `<span class="pos-card-badge">${qtyLabel} in cart</span>` : ""}
+            </span>
           </span>
-          <span class="pos-card-add" aria-hidden="true">+</span>
+          <span class="pos-card-add" aria-hidden="true">${qty ? "+" : "Add"}</span>
         </button>`;
       })
       .join("");
@@ -558,6 +610,9 @@
   cartClose?.addEventListener("click", () => setCartOpen(false));
   cartBackdrop?.addEventListener("click", () => setCartOpen(false));
 
+  deliverLaterEl?.addEventListener("change", syncDeliveryDateUi);
+  syncDeliveryDateUi();
+
   checkoutBtn?.addEventListener("click", async () => {
     showError("");
     if (!clientSelect?.value) {
@@ -570,6 +625,15 @@
       showError("Add at least one product");
       return;
     }
+    if (deliverLaterEl?.checked) {
+      const d = deliveryDateEl?.value || "";
+      if (!d || d <= todayIsoLocal()) {
+        showError("Pick a future delivery date");
+        deliveryDateEl?.focus();
+        setCartOpen(true);
+        return;
+      }
+    }
     checkoutBtn.disabled = true;
     const prevLabel = checkoutBtn.textContent;
     checkoutBtn.textContent = "Creating order…";
@@ -581,19 +645,124 @@
           lead_id: clientSelect.value,
           lines: cart,
           delivery_address: addressEl?.value || "",
+          delivery_date: selectedDeliveryDate(),
           notes: notesEl?.value || "",
           save_client_prices: Boolean(savePricesCheck?.checked),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Checkout failed");
-      window.location.href = data.redirect || "/pos";
+      lastReceipt = {
+        id: data.id,
+        receipt_url: data.receipt_url || `/pos/orders/${data.id}/receipt.pdf`,
+        whatsapp_text: data.whatsapp_text || `Order #${data.id}`,
+        whatsapp_phone: data.whatsapp_phone || null,
+      };
+      resetAfterSale();
+      openReceiptModal(lastReceipt);
     } catch (err) {
       showError(err.message || "Checkout failed");
       checkoutBtn.disabled = false;
       checkoutBtn.textContent = prevLabel || "Create order";
     }
   });
+
+  function resetAfterSale() {
+    cart = [];
+    if (addressEl) addressEl.value = "";
+    if (notesEl) notesEl.value = "";
+    if (deliverLaterEl) deliverLaterEl.checked = false;
+    if (savePricesCheck) savePricesCheck.checked = false;
+    syncDeliveryDateUi();
+    setCartOpen(false);
+    renderCart();
+    renderGrid();
+  }
+
+  function openReceiptModal(info) {
+    if (!receiptModal) return;
+    if (receiptMsg) {
+      receiptMsg.textContent = `Order #${info.id} created. Receipt PDF is ready to send.`;
+    }
+    if (receiptDownload) {
+      receiptDownload.href = info.receipt_url;
+      receiptDownload.setAttribute("download", `receipt-${info.id}.pdf`);
+    }
+    receiptModal.hidden = false;
+    document.body.classList.add("pos-modal-open");
+  }
+
+  function closeReceiptModal() {
+    if (!receiptModal) return;
+    receiptModal.hidden = true;
+    document.body.classList.remove("pos-modal-open");
+  }
+
+  async function fetchReceiptFile(info) {
+    const res = await fetch(info.receipt_url, { credentials: "same-origin" });
+    if (!res.ok) throw new Error("Could not load receipt PDF");
+    const blob = await res.blob();
+    return new File([blob], `receipt-${info.id}.pdf`, { type: "application/pdf" });
+  }
+
+  function downloadReceiptFile(file) {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  function openWhatsAppText(info) {
+    const text = encodeURIComponent(info.whatsapp_text || "");
+    const phone = info.whatsapp_phone;
+    const url = phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  receiptWhatsappBtn?.addEventListener("click", async () => {
+    if (!lastReceipt) return;
+    receiptWhatsappBtn.disabled = true;
+    const label = receiptWhatsappBtn.textContent;
+    receiptWhatsappBtn.textContent = "Preparing…";
+    try {
+      const file = await fetchReceiptFile(lastReceipt);
+      const shareData = {
+        files: [file],
+        title: `Order #${lastReceipt.id}`,
+        text: lastReceipt.whatsapp_text,
+      };
+      if (navigator.canShare && navigator.canShare(shareData)) {
+        await navigator.share(shareData);
+        showToast("Pick WhatsApp to send the PDF");
+      } else {
+        downloadReceiptFile(file);
+        openWhatsAppText(lastReceipt);
+        showToast("PDF downloaded — attach it in WhatsApp");
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      try {
+        openWhatsAppText(lastReceipt);
+        showToast("WhatsApp opened with order text");
+      } catch (_) {
+        showError(err.message || "Could not share receipt");
+      }
+    } finally {
+      receiptWhatsappBtn.disabled = false;
+      receiptWhatsappBtn.textContent = label || "Send on WhatsApp";
+    }
+  });
+
+  receiptDone?.addEventListener("click", () => {
+    closeReceiptModal();
+    showToast("Ready for next sale");
+  });
+  receiptClose?.addEventListener("click", closeReceiptModal);
+  receiptBackdrop?.addEventListener("click", closeReceiptModal);
 
   window.addEventListener("resize", () => {
     if (window.matchMedia("(min-width: 901px)").matches) {

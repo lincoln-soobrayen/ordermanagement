@@ -563,6 +563,7 @@ app.get("/dashboard", requireAuth, blockDriver, async (req, res) => {
 const leadStatuses = ["new", "contacted", "qualified", "converted", "lost"];
 const orderStatuses = ["order_placed", "pending", "confirmed", "shipped", "completed", "cancelled"];
 const deliveryStatuses = ["not_shipped", "shipped", "in_transit", "delivered", "returned"];
+const paymentStatuses = ["unpaid", "paid"];
 const regions = ["north", "south", "east", "west", "center"];
 
 function localIso(d: Date): string {
@@ -934,13 +935,17 @@ function leadsTable(rows: Partial<Lead>[], actions = false): string {
 }
 
 app.get("/orders", requireAuth, blockDriver, async (req, res) => {
-  const { status, q } = req.query as { status?: string; q?: string };
+  const { status, payment, q } = req.query as { status?: string; payment?: string; q?: string };
   const orderF = await orderFilter(req, "o");
   let where = "WHERE 1=1";
   const params: (string | number | undefined)[] = [...orderF.params];
   if (status) {
     params.push(status);
     where += ` AND o.status = $${params.length}`;
+  }
+  if (payment === "unpaid" || payment === "paid") {
+    params.push(payment);
+    where += ` AND o.payment_status = $${params.length}`;
   }
   if (q) {
     params.push(`%${q}%`);
@@ -966,6 +971,10 @@ app.get("/orders", requireAuth, blockDriver, async (req, res) => {
           <select name="status">
             <option value="">All statuses</option>
             ${statusOptions(status || "", orderStatuses)}
+          </select>
+          <select name="payment">
+            <option value="">All payments</option>
+            ${statusOptions(payment || "", paymentStatuses)}
           </select>
           <button type="submit">Filter</button>
           <a href="/export/orders" class="button secondary">Export CSV</a>
@@ -1182,7 +1191,8 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
-  const { lead_id, delivery_status, delivery_address, delivery_date, notes, driver_id } = req.body;
+  const { lead_id, delivery_status, delivery_address, delivery_date, notes, driver_id, payment_status, invoice_number } =
+    req.body;
   const isSample = Boolean(req.body.is_sample);
   const lines = parseOrderLines(req, isSample);
   const admin = isAdmin(req);
@@ -1194,6 +1204,8 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
       return;
     }
   }
+  const nextPayment = payment_status === "paid" ? "paid" : "unpaid";
+  const nextInvoice = String(invoice_number || "").trim() || null;
   const customer_name = await customerNameFromLead(lead_id);
   const savePricesFor = await clientPricesTarget(req, lead_id, isSample);
   const client = await pool.connect();
@@ -1201,7 +1213,15 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     await client.query("BEGIN");
     const finalOrderValue = lines.reduce((sum, line) => sum + line.quantity_kg * line.unit_price, 0);
     await client.query(
-      "UPDATE orders SET lead_id = $1, user_id = $2, driver_id = $3, customer_name = $4, order_value = $5, delivery_status = $6, delivery_address = $7, delivery_date = $8, notes = $9, updated_at = CURRENT_TIMESTAMP WHERE id = $10",
+      `UPDATE orders SET lead_id = $1, user_id = $2, driver_id = $3, customer_name = $4, order_value = $5,
+        delivery_status = $6, delivery_address = $7, delivery_date = $8, notes = $9,
+        payment_status = $10,
+        paid_at = CASE
+          WHEN $10 = 'paid' THEN COALESCE(paid_at, CURRENT_TIMESTAMP)
+          ELSE NULL
+        END,
+        invoice_number = $11,
+        updated_at = CURRENT_TIMESTAMP WHERE id = $12`,
       [
         lead_id || null,
         user_id || null,
@@ -1212,6 +1232,8 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
         delivery_address || null,
         delivery_date || null,
         notes || null,
+        nextPayment,
+        nextInvoice,
         req.params.id,
       ]
     );
@@ -1234,8 +1256,13 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     await client.query("COMMIT");
     setFlash(req, `Order updated${clientPricesFlash(savedPrices)}`);
     if (delivery_status === "delivered") await scheduleDeliveryFollowUp(parseInt(req.params.id, 10), req.session.user!.id);
-  } catch (err) {
+  } catch (err: unknown) {
     await client.query("ROLLBACK");
+    if ((err as { code?: string })?.code === "23505") {
+      setFlash(req, "That invoice number is already used on another order", "error");
+      res.redirect(`/orders/${req.params.id}/edit`);
+      return;
+    }
     throw err;
   } finally {
     client.release();
@@ -1258,6 +1285,34 @@ app.post("/orders/:id/deliver", requireAuth, async (req, res) => {
   res.redirect(isDriver(req) ? "/deliveries" : "/orders");
 });
 
+app.post("/orders/:id/mark-paid", requireAuth, blockDriver, async (req, res) => {
+  const orderId = parseInt(req.params.id, 10);
+  if (!(await canAccessOrder(req, orderId))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  await pool.query(
+    `UPDATE orders SET payment_status = 'paid', paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [orderId]
+  );
+  setFlash(req, "Order marked as paid");
+  res.redirect(safeReturnTo(req.body.return_to, "/orders"));
+});
+
+app.post("/orders/:id/mark-unpaid", requireAuth, blockDriver, async (req, res) => {
+  const orderId = parseInt(req.params.id, 10);
+  if (!(await canAccessOrder(req, orderId))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  await pool.query(
+    `UPDATE orders SET payment_status = 'unpaid', paid_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+    [orderId]
+  );
+  setFlash(req, "Order marked as unpaid");
+  res.redirect(safeReturnTo(req.body.return_to, "/orders"));
+});
+
 app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
   if (!(await canAccessOrder(req, parseInt(req.params.id, 10)))) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
@@ -1266,6 +1321,86 @@ app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
   await pool.query("DELETE FROM orders WHERE id = $1", [req.params.id]);
   setFlash(req, "Order deleted");
   res.redirect("/orders");
+});
+
+app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
+  const { payment, q, missing } = req.query as { payment?: string; q?: string; missing?: string };
+  const orderF = await orderFilter(req, "o");
+  let where = "WHERE 1=1";
+  const params: (string | number | undefined)[] = [...orderF.params];
+  if (payment === "unpaid" || payment === "paid") {
+    params.push(payment);
+    where += ` AND o.payment_status = $${params.length}`;
+  }
+  if (missing === "1") {
+    where += ` AND (o.invoice_number IS NULL OR o.invoice_number = '')`;
+  }
+  if (q) {
+    params.push(`%${q}%`);
+    where += ` AND (o.customer_name ILIKE $${params.length} OR o.invoice_number ILIKE $${params.length} OR CAST(o.id AS TEXT) ILIKE $${params.length})`;
+  }
+
+  const result = await pool.query(
+    `SELECT o.id, o.customer_name, o.order_date, o.order_value, o.invoice_number, o.payment_status, o.paid_at,
+            l.name AS lead_name, u.name AS owner_name
+     FROM orders o
+     LEFT JOIN leads l ON o.lead_id = l.id
+     LEFT JOIN users u ON o.user_id = u.id
+     ${where}${orderF.where}
+     ORDER BY o.order_date DESC, o.id DESC`,
+    params
+  );
+
+  res.send(
+    renderPage(
+      "Invoices",
+      `
+      <div class="page-title-row">
+        <h1>Invoices</h1>
+      </div>
+      <div class="toolbar">
+        <form method="get" class="filters">
+          <input type="search" name="q" value="${escapeHtml(q || "")}" placeholder="Search customer, invoice #…">
+          <select name="payment">
+            <option value="">All payments</option>
+            ${statusOptions(payment || "", paymentStatuses)}
+          </select>
+          <label class="filter-check">
+            <input type="checkbox" name="missing" value="1"${missing === "1" ? " checked" : ""}>
+            Missing invoice #
+          </label>
+          <button type="submit">Filter</button>
+        </form>
+      </div>
+      <div class="table-wrap">${invoicesTable(result.rows)}</div>`,
+      req
+    )
+  );
+});
+
+app.post("/invoices/:id/number", requireAuth, blockDriver, async (req, res) => {
+  const orderId = parseInt(req.params.id, 10);
+  const returnTo = safeReturnTo(req.body.return_to, "/invoices");
+  if (!(await canAccessOrder(req, orderId))) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  const nextInvoice = String(req.body.invoice_number || "").trim() || null;
+  try {
+    await pool.query(
+      `UPDATE orders SET invoice_number = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [nextInvoice, orderId]
+    );
+    setFlash(req, nextInvoice ? `Invoice number saved: ${nextInvoice}` : "Invoice number cleared");
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code;
+    if (code === "23505") {
+      setFlash(req, "That invoice number is already used on another order", "error");
+    } else {
+      throw err;
+    }
+  }
+  res.redirect(returnTo);
 });
 
 app.get("/deliveries", requireAuth, async (req, res) => {
@@ -1477,6 +1612,13 @@ function orderFormFields(
       order.delivery_status || "",
       deliveryStatuses
     )}</select></label>
+    <label>Payment<select name="payment_status">${statusOptions(
+      order.payment_status || "unpaid",
+      paymentStatuses
+    )}</select></label>
+    <label>Invoice number<input type="text" name="invoice_number" value="${escapeHtml(
+      order.invoice_number || ""
+    )}" placeholder="Optional" maxlength="50" autocomplete="off"></label>
     <label>Delivery Date &amp; Time<input type="datetime-local" name="delivery_date" id="delivery-date" value="${escapeHtml(
       order.delivery_date ? new Date(order.delivery_date).toISOString().slice(0, 16) : ""
     )}"></label>
@@ -1692,12 +1834,82 @@ function deliveriesTable(rows: DeliveryRow[], showAdminColumns: boolean, opts: D
     </table>`;
 }
 
+function invoicesTable(
+  rows: {
+    id: number;
+    customer_name: string;
+    order_date: Date | string | null;
+    order_value: number;
+    invoice_number: string | null;
+    payment_status: string | null;
+    lead_name?: string | null;
+    owner_name?: string | null;
+  }[]
+): string {
+  if (rows.length === 0) return '<p class="empty">No orders found.</p>';
+  return `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Order</th>
+          <th>Customer</th>
+          <th>Date</th>
+          <th>Value</th>
+          <th>Invoice #</th>
+          <th>Payment</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .map((o) => {
+            const date = o.order_date ? new Date(o.order_date).toLocaleDateString() : "";
+            const isPaid = (o.payment_status || "unpaid") === "paid";
+            const paymentClass = isPaid ? "status-paid" : "status-unpaid";
+            const paymentLabel = isPaid ? "Paid" : "Unpaid";
+            return `
+          <tr>
+            <td>#${escapeHtml(o.id)}</td>
+            <td>${escapeHtml(o.customer_name)}${
+              o.lead_name ? `<div class="muted small">${escapeHtml(o.lead_name)}</div>` : ""
+            }</td>
+            <td>${escapeHtml(date)}</td>
+            <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
+            <td>
+              <form method="post" action="/invoices/${o.id}/number" class="invoice-number-form">
+                <input type="hidden" name="return_to" value="/invoices">
+                <input type="text" name="invoice_number" value="${escapeHtml(o.invoice_number || "")}" maxlength="50" placeholder="e.g. INV-104" autocomplete="off" aria-label="Invoice number for order ${escapeHtml(o.id)}">
+                <button type="submit" class="button small secondary">Save</button>
+              </form>
+            </td>
+            <td><span class="status ${paymentClass}">${escapeHtml(paymentLabel)}</span></td>
+            <td class="actions">
+              ${
+                isPaid
+                  ? `<form method="post" action="/orders/${o.id}/mark-unpaid" class="inline">
+                       <input type="hidden" name="return_to" value="/invoices">
+                       <button type="submit" class="button small secondary">Mark unpaid</button>
+                     </form>`
+                  : `<form method="post" action="/orders/${o.id}/mark-paid" class="inline">
+                       <input type="hidden" name="return_to" value="/invoices">
+                       <button type="submit" class="button small success">Mark paid</button>
+                     </form>`
+              }
+              <a href="/orders/${o.id}/edit" class="button small">Edit order</a>
+            </td>
+          </tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>`;
+}
+
 function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
   if (rows.length === 0) return "<p class=\"empty\">No orders found.</p>";
   return `
     <table class="data-table">
       <thead>
-        <tr><th>Customer</th><th>Lead</th><th>Owner</th><th>Status</th><th>Delivery</th><th>Date</th><th>Value</th>${
+        <tr><th>Customer</th><th>Lead</th><th>Owner</th><th>Status</th><th>Delivery</th><th>Payment</th><th>Date</th><th>Value</th>${
           actions ? "<th>Actions</th>" : ""
         }</tr>
       </thead>
@@ -1713,6 +1925,9 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
                 ? o.delivery_status.charAt(0).toUpperCase() + o.delivery_status.slice(1).replace(/_/g, " ")
                 : "Not shipped";
               const canDeliver = (o.delivery_status || "not_shipped") !== "delivered";
+              const isPaid = (o.payment_status || "unpaid") === "paid";
+              const paymentClass = isPaid ? "status-paid" : "status-unpaid";
+              const paymentLabel = isPaid ? "Paid" : "Unpaid";
               return `
           <tr>
             <td>${escapeHtml(o.customer_name)}</td>
@@ -1722,6 +1937,7 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
             )}</td>
             <td><span class="status status-${escapeHtml(o.status)}">${escapeHtml(labelize(o.status))}</span></td>
             <td><span class="status ${deliveryClass}">${escapeHtml(deliveryLabel)}</span></td>
+            <td><span class="status ${paymentClass}">${escapeHtml(paymentLabel)}</span></td>
             <td>${escapeHtml(date)}</td>
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
             ${
@@ -1737,6 +1953,15 @@ function ordersTable(rows: Partial<OrderWithLead>[], actions = false): string {
                              <button type="submit" class="button small success">Deliver</button>
                            </form>`
                         : ""
+                    }
+                    ${
+                      isPaid
+                        ? `<form method="post" action="/orders/${o.id}/mark-unpaid" class="inline">
+                             <button type="submit" class="button small secondary">Mark unpaid</button>
+                           </form>`
+                        : `<form method="post" action="/orders/${o.id}/mark-paid" class="inline">
+                             <button type="submit" class="button small success">Mark paid</button>
+                           </form>`
                     }
                     <form method="post" action="/orders/${o.id}/delete" class="inline">
                       <button type="submit" class="button small danger" onclick="return confirm('Delete this order?')">Delete</button>

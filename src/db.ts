@@ -160,7 +160,20 @@ export async function initDb(): Promise<void> {
       ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(50) DEFAULT 'not_shipped',
       ADD COLUMN IF NOT EXISTS delivery_address TEXT,
       ADD COLUMN IF NOT EXISTS shipped_date DATE,
-      ADD COLUMN IF NOT EXISTS delivery_date TIMESTAMP
+      ADD COLUMN IF NOT EXISTS delivery_date TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
+      ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(50)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_invoice_number
+      ON orders (invoice_number)
+      WHERE invoice_number IS NOT NULL AND invoice_number <> '';
     `);
 
     await client.query(`
@@ -518,6 +531,9 @@ export interface Order {
   delivery_address: string | null;
   shipped_date: Date | null;
   delivery_date: Date | null;
+  payment_status: string;
+  paid_at: Date | null;
+  invoice_number: string | null;
   notes: string | null;
   created_at: Date;
   updated_at: Date;

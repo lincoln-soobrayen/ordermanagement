@@ -1256,18 +1256,23 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
     await client.query("COMMIT");
     setFlash(req, `Order updated${clientPricesFlash(savedPrices)}`);
     if (delivery_status === "delivered") await scheduleDeliveryFollowUp(parseInt(req.params.id, 10), req.session.user!.id);
+    res.redirect("/orders");
   } catch (err: unknown) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackErr) {
+      console.error("Order update rollback failed", rollbackErr);
+    }
+    console.error("Order update failed", err);
     if ((err as { code?: string })?.code === "23505") {
       setFlash(req, "That invoice number is already used on another order", "error");
-      res.redirect(`/orders/${req.params.id}/edit`);
-      return;
+    } else {
+      setFlash(req, "Could not update order", "error");
     }
-    throw err;
+    res.redirect(`/orders/${req.params.id}/edit`);
   } finally {
     client.release();
   }
-  res.redirect("/orders");
 });
 
 app.post("/orders/:id/deliver", requireAuth, async (req, res) => {

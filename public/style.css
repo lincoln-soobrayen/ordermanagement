@@ -612,6 +612,21 @@ form select {
   font-size: 0.9rem;
 }
 
+.invoice-save-status {
+  min-width: 3.5rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.invoice-save-status.is-ok {
+  color: #166534;
+}
+
+.invoice-save-status.is-error {
+  color: #991b1b;
+}
+
 .muted.small {
   font-size: 0.8rem;
   margin-top: 2px;

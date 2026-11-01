@@ -1402,7 +1402,8 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
           <button type="submit">Filter</button>
         </form>
       </div>
-      <div class="table-wrap">${invoicesTable(result.rows, returnTo)}</div>`,
+      <div class="table-wrap">${invoicesTable(result.rows, returnTo)}</div>
+      <script src="/invoices.js"></script>`,
       req
     )
   );
@@ -1411,7 +1412,15 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
 app.post("/invoices/:id/number", requireAuth, blockDriver, async (req, res) => {
   const orderId = parseInt(req.params.id, 10);
   const returnTo = safeReturnTo(req.body.return_to, "/invoices");
+  const wantsJson =
+    req.xhr ||
+    (req.headers.accept || "").includes("application/json") ||
+    (req.headers["content-type"] || "").includes("application/json");
   if (!(await canAccessOrder(req, orderId))) {
+    if (wantsJson) {
+      res.status(403).json({ error: "Access denied" });
+      return;
+    }
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
@@ -1421,10 +1430,18 @@ app.post("/invoices/:id/number", requireAuth, blockDriver, async (req, res) => {
       `UPDATE orders SET invoice_number = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
       [nextInvoice, orderId]
     );
+    if (wantsJson) {
+      res.json({ ok: true, invoice_number: nextInvoice });
+      return;
+    }
     setFlash(req, nextInvoice ? `Invoice number saved: ${nextInvoice}` : "Invoice number cleared");
   } catch (err: unknown) {
     const code = (err as { code?: string })?.code;
     if (code === "23505") {
+      if (wantsJson) {
+        res.status(409).json({ error: "That invoice number is already used on another order" });
+        return;
+      }
       setFlash(req, "That invoice number is already used on another order", "error");
     } else {
       throw err;
@@ -1908,10 +1925,11 @@ function invoicesTable(
             <td>${escapeHtml(date)}</td>
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
             <td>
-              <form method="post" action="/invoices/${o.id}/number" class="invoice-number-form">
+              <form method="post" action="/invoices/${o.id}/number" class="invoice-number-form" data-order-id="${escapeHtml(o.id)}">
                 <input type="hidden" name="return_to" value="${returnAttr}">
                 <input type="text" name="invoice_number" value="${escapeHtml(o.invoice_number || "")}" maxlength="50" placeholder="e.g. INV-104" autocomplete="off" aria-label="Invoice number for order ${escapeHtml(o.id)}">
                 <button type="submit" class="button small secondary">Save</button>
+                <span class="invoice-save-status" aria-live="polite"></span>
               </form>
             </td>
             <td><span class="status ${paymentClass}">${escapeHtml(paymentLabel)}</span></td>

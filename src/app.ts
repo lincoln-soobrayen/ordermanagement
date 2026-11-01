@@ -1324,7 +1324,12 @@ app.post("/orders/:id/delete", requireAuth, blockDriver, async (req, res) => {
 });
 
 app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
-  const { payment, q, missing } = req.query as { payment?: string; q?: string; missing?: string };
+  const { payment, q, missing, sort } = req.query as {
+    payment?: string;
+    q?: string;
+    missing?: string;
+    sort?: string;
+  };
   const orderF = await orderFilter(req, "o");
   let where = "WHERE 1=1";
   const params: (string | number | undefined)[] = [...orderF.params];
@@ -1340,6 +1345,18 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
     where += ` AND (o.customer_name ILIKE $${params.length} OR o.invoice_number ILIKE $${params.length} OR CAST(o.id AS TEXT) ILIKE $${params.length})`;
   }
 
+  const sortKey = ["date_asc", "date_desc", "order_asc", "order_desc"].includes(sort || "")
+    ? (sort as string)
+    : "date_desc";
+  const orderBy =
+    sortKey === "date_asc"
+      ? "o.order_date ASC, o.id ASC"
+      : sortKey === "order_asc"
+        ? "o.id ASC"
+        : sortKey === "order_desc"
+          ? "o.id DESC"
+          : "o.order_date DESC, o.id DESC";
+
   const result = await pool.query(
     `SELECT o.id, o.customer_name, o.order_date, o.order_value, o.invoice_number, o.payment_status, o.paid_at,
             l.name AS lead_name, u.name AS owner_name
@@ -1347,9 +1364,16 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
      LEFT JOIN leads l ON o.lead_id = l.id
      LEFT JOIN users u ON o.user_id = u.id
      ${where}${orderF.where}
-     ORDER BY o.order_date DESC, o.id DESC`,
+     ORDER BY ${orderBy}`,
     params
   );
+
+  const returnQs = new URLSearchParams();
+  if (q) returnQs.set("q", q);
+  if (payment) returnQs.set("payment", payment);
+  if (missing === "1") returnQs.set("missing", "1");
+  if (sortKey !== "date_desc") returnQs.set("sort", sortKey);
+  const returnTo = `/invoices${returnQs.toString() ? `?${returnQs.toString()}` : ""}`;
 
   res.send(
     renderPage(
@@ -1365,6 +1389,12 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
             <option value="">All payments</option>
             ${statusOptions(payment || "", paymentStatuses)}
           </select>
+          <select name="sort" aria-label="Sort by">
+            <option value="date_desc"${sortKey === "date_desc" ? " selected" : ""}>Date (newest)</option>
+            <option value="date_asc"${sortKey === "date_asc" ? " selected" : ""}>Date (oldest)</option>
+            <option value="order_desc"${sortKey === "order_desc" ? " selected" : ""}>Order # (high–low)</option>
+            <option value="order_asc"${sortKey === "order_asc" ? " selected" : ""}>Order # (low–high)</option>
+          </select>
           <label class="filter-check">
             <input type="checkbox" name="missing" value="1"${missing === "1" ? " checked" : ""}>
             Missing invoice #
@@ -1372,7 +1402,7 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
           <button type="submit">Filter</button>
         </form>
       </div>
-      <div class="table-wrap">${invoicesTable(result.rows)}</div>`,
+      <div class="table-wrap">${invoicesTable(result.rows, returnTo)}</div>`,
       req
     )
   );
@@ -1844,9 +1874,11 @@ function invoicesTable(
     payment_status: string | null;
     lead_name?: string | null;
     owner_name?: string | null;
-  }[]
+  }[],
+  returnTo = "/invoices"
 ): string {
   if (rows.length === 0) return '<p class="empty">No orders found.</p>';
+  const returnAttr = escapeHtml(returnTo);
   return `
     <table class="data-table">
       <thead>
@@ -1877,7 +1909,7 @@ function invoicesTable(
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
             <td>
               <form method="post" action="/invoices/${o.id}/number" class="invoice-number-form">
-                <input type="hidden" name="return_to" value="/invoices">
+                <input type="hidden" name="return_to" value="${returnAttr}">
                 <input type="text" name="invoice_number" value="${escapeHtml(o.invoice_number || "")}" maxlength="50" placeholder="e.g. INV-104" autocomplete="off" aria-label="Invoice number for order ${escapeHtml(o.id)}">
                 <button type="submit" class="button small secondary">Save</button>
               </form>
@@ -1887,11 +1919,11 @@ function invoicesTable(
               ${
                 isPaid
                   ? `<form method="post" action="/orders/${o.id}/mark-unpaid" class="inline">
-                       <input type="hidden" name="return_to" value="/invoices">
+                       <input type="hidden" name="return_to" value="${returnAttr}">
                        <button type="submit" class="button small secondary">Mark unpaid</button>
                      </form>`
                   : `<form method="post" action="/orders/${o.id}/mark-paid" class="inline">
-                       <input type="hidden" name="return_to" value="/invoices">
+                       <input type="hidden" name="return_to" value="${returnAttr}">
                        <button type="submit" class="button small success">Mark paid</button>
                      </form>`
               }

@@ -1514,11 +1514,11 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
   const admin = isAdmin(req);
   const salespeople = (
     await pool.query(
-      `SELECT id, name, commission_rate_percent FROM users
+      `SELECT id, name FROM users
        WHERE role IN ('salesperson', 'admin') AND is_active = true
        ORDER BY name`
     )
-  ).rows as { id: number; name: string; commission_rate_percent: string | number }[];
+  ).rows as { id: number; name: string }[];
 
   let targetId = req.session.user!.id;
   if (admin) {
@@ -1531,20 +1531,14 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
   }
 
   const target = (
-    await pool.query(
-      `SELECT id, name, role, commission_rate_percent FROM users WHERE id = $1`,
-      [targetId]
-    )
-  ).rows[0] as
-    | { id: number; name: string; role: string; commission_rate_percent: string | number }
-    | undefined;
+    await pool.query(`SELECT id, name, role FROM users WHERE id = $1`, [targetId])
+  ).rows[0] as { id: number; name: string; role: string } | undefined;
 
   if (!target || (!admin && target.id !== req.session.user!.id)) {
     res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
     return;
   }
 
-  const rate = Number(target.commission_rate_percent ?? 10);
   const marginResult = await pool.query(
     `SELECT COALESCE(SUM((oi.unit_price - COALESCE(oi.unit_cost, 0)) * oi.quantity_kg), 0) AS margin
      FROM orders o
@@ -1555,8 +1549,8 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
        AND NOT (${SAMPLE_ORDER_SQL})`,
     [targetId]
   );
-  const orderMargin = Number(marginResult.rows[0]?.margin || 0);
-  const totalCommission = orderMargin * (rate / 100);
+  // Commission = full margin on paid, non-sample orders for this salesperson.
+  const totalCommission = Number(marginResult.rows[0]?.margin || 0);
 
   const receivedResult = await pool.query(
     `SELECT COALESCE(SUM(amount), 0) AS received FROM commission_payments WHERE user_id = $1`,
@@ -1601,12 +1595,11 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
       </div>`
           : ""
       }
-      <p class="muted">Margin on paid orders × ${escapeHtml(rate)}% for ${escapeHtml(target.name)}</p>
+      <p class="muted">Commission = margin on paid orders for ${escapeHtml(target.name)} (samples excluded)</p>
       <section class="stats">
         <div class="card highlight"><strong>Rs ${escapeHtml(Number(totalCommission).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Total commission</span></div>
         <div class="card"><strong>Rs ${escapeHtml(Number(totalReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Received</span></div>
         <div class="card"><strong>Rs ${escapeHtml(Number(remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Remaining</span></div>
-        <div class="card"><strong>Rs ${escapeHtml(Number(orderMargin).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Order margin (paid)</span></div>
       </section>
 
       <section>
@@ -2326,24 +2319,21 @@ app.get("/users/new", requireAuth, blockDriver, requireAdmin, (req, res) => {
 });
 
 app.post("/users", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const { name, email, password, role, is_active, commission_rate_percent } = req.body;
+  const { name, email, password, role, is_active } = req.body;
   const safeRole = USER_ROLES.some((r) => r.value === role) ? role : "salesperson";
   const hash = await hashPassword(password);
-  const rate = parseCommissionRate(commission_rate_percent);
   await pool.query(
-    `INSERT INTO users (name, email, password_hash, role, is_active, commission_rate_percent)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [name, email, hash, safeRole, is_active === "on", rate]
+    "INSERT INTO users (name, email, password_hash, role, is_active) VALUES ($1, $2, $3, $4, $5)",
+    [name, email, hash, safeRole, is_active === "on"]
   );
   setFlash(req, "User created");
   res.redirect("/users");
 });
 
 app.get("/users/:id/edit", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const result = await pool.query(
-    "SELECT id, name, email, role, is_active, commission_rate_percent FROM users WHERE id = $1",
-    [req.params.id]
-  );
+  const result = await pool.query("SELECT id, name, email, role, is_active FROM users WHERE id = $1", [
+    req.params.id,
+  ]);
   const user = result.rows[0];
   if (!user) {
     res.status(404).send(renderPage("Not Found", "<h1>User not found</h1>", req));
@@ -2367,7 +2357,7 @@ app.get("/users/:id/edit", requireAuth, blockDriver, requireAdmin, async (req, r
 });
 
 app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const { name, email, password, role, is_active, commission_rate_percent } = req.body;
+  const { name, email, password, role, is_active } = req.body;
   const updates: (string | number | boolean | null)[] = [];
   const fields: string[] = [];
   let paramIndex = 1;
@@ -2388,8 +2378,6 @@ app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req
     fields.push(`role = $${paramIndex++}`);
     updates.push(role);
   }
-  fields.push(`commission_rate_percent = $${paramIndex++}`);
-  updates.push(parseCommissionRate(commission_rate_percent));
   fields.push(`is_active = $${paramIndex++}`);
   updates.push(is_active === "on");
   fields.push(`updated_at = CURRENT_TIMESTAMP`);
@@ -2445,27 +2433,16 @@ function roleLabel(role: string | undefined): string {
   return USER_ROLES.find((r) => r.value === role)?.label || role.charAt(0).toUpperCase() + role.slice(1);
 }
 
-function parseCommissionRate(raw: unknown): number {
-  const n = parseFloat(String(raw ?? ""));
-  if (!Number.isFinite(n) || n < 0) return 10;
-  return Math.min(100, Math.round(n * 100) / 100);
-}
-
 function userFormFields(user: Partial<User>): string {
   const roleOptions = USER_ROLES.map(
     (r) =>
       `<option value="${escapeHtml(r.value)}" ${user.role === r.value ? "selected" : ""}>${escapeHtml(r.label)}</option>`
   ).join("");
-  const rate =
-    user.commission_rate_percent != null && Number.isFinite(Number(user.commission_rate_percent))
-      ? Number(user.commission_rate_percent)
-      : 10;
   return `
     <label>Name * <input type="text" name="name" value="${escapeHtml(user.name)}" required></label>
     <label>Email * <input type="email" name="email" value="${escapeHtml(user.email)}" required></label>
     <label>Password ${user.id ? "(leave blank to keep unchanged)" : "*"}<input type="password" name="password" ${user.id ? "" : "required"}></label>
     <label>Role *<select name="role" required>${roleOptions}</select></label>
-    <label>Commission % <input type="number" name="commission_rate_percent" value="${escapeHtml(rate)}" min="0" max="100" step="0.01"></label>
     <label class="full">
       <input type="checkbox" name="is_active" ${user.is_active !== false ? "checked" : ""}> Active
     </label>

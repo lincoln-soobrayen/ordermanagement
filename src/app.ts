@@ -1595,11 +1595,11 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
       </div>`
           : ""
       }
-      <p class="muted">Commission = margin on paid orders for ${escapeHtml(target.name)} (samples excluded)</p>
+      <p class="muted">Paid-order margin for ${escapeHtml(target.name)} (samples excluded). Balance = total margin − payments.</p>
       <section class="stats">
-        <div class="card highlight"><strong>Rs ${escapeHtml(Number(totalCommission).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Total commission</span></div>
-        <div class="card"><strong>Rs ${escapeHtml(Number(totalReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Received</span></div>
-        <div class="card"><strong>Rs ${escapeHtml(Number(remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Remaining</span></div>
+        <div class="card"><strong>Rs ${escapeHtml(Number(totalCommission).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Total margin</span></div>
+        <div class="card"><strong>Rs ${escapeHtml(Number(totalReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Payments</span></div>
+        <div class="card highlight"><strong>Rs ${escapeHtml(Number(remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Balance (margin − payments)</span></div>
       </section>
 
       <section>

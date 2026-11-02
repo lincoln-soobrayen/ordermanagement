@@ -1217,11 +1217,11 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
         delivery_status = $6, delivery_address = $7, delivery_date = $8, notes = $9,
         payment_status = $10,
         paid_at = CASE
-          WHEN $10 = 'paid' THEN COALESCE(paid_at, CURRENT_TIMESTAMP)
+          WHEN $11 = 'paid' THEN COALESCE(paid_at, CURRENT_TIMESTAMP)
           ELSE NULL
         END,
-        invoice_number = $11,
-        updated_at = CURRENT_TIMESTAMP WHERE id = $12`,
+        invoice_number = $12,
+        updated_at = CURRENT_TIMESTAMP WHERE id = $13`,
       [
         lead_id || null,
         user_id || null,
@@ -1232,6 +1232,7 @@ app.post("/orders/:id/update", requireAuth, blockDriver, async (req, res) => {
         delivery_address || null,
         delivery_date || null,
         notes || null,
+        nextPayment,
         nextPayment,
         nextInvoice,
         req.params.id,
@@ -1407,11 +1408,65 @@ app.get("/invoices", requireAuth, blockDriver, async (req, res) => {
           <button type="submit">Filter</button>
         </form>
       </div>
-      <div class="table-wrap">${invoicesTable(result.rows, returnTo)}</div>
+      <form method="post" action="/invoices/bulk-payment" id="invoices-bulk-form">
+        <input type="hidden" name="return_to" value="${escapeHtml(returnTo)}">
+        <div class="invoice-bulk-bar" id="invoice-bulk-bar" hidden>
+          <span class="invoice-bulk-count" id="invoice-bulk-count">0 selected</span>
+          <button type="submit" name="payment" value="paid" class="button small success">Mark paid</button>
+          <button type="submit" name="payment" value="unpaid" class="button small secondary">Mark unpaid</button>
+        </div>
+        <div class="table-wrap">${invoicesTable(result.rows, returnTo)}</div>
+      </form>
       <script src="/invoices.js"></script>`,
       req
     )
   );
+});
+
+app.post("/invoices/bulk-payment", requireAuth, blockDriver, async (req, res) => {
+  const returnTo = safeReturnTo(req.body.return_to, "/invoices");
+  const payment = req.body.payment === "paid" ? "paid" : req.body.payment === "unpaid" ? "unpaid" : "";
+  const rawIds = req.body.order_ids;
+  const idList = (Array.isArray(rawIds) ? rawIds : rawIds != null ? [rawIds] : [])
+    .map((id: string) => parseInt(String(id), 10))
+    .filter((id: number) => Number.isFinite(id) && id > 0);
+
+  if (!payment || !idList.length) {
+    setFlash(req, "Select at least one order", "error");
+    res.redirect(returnTo);
+    return;
+  }
+
+  const allowed: number[] = [];
+  for (const id of idList) {
+    if (await canAccessOrder(req, id)) allowed.push(id);
+  }
+  if (!allowed.length) {
+    setFlash(req, "No accessible orders selected", "error");
+    res.redirect(returnTo);
+    return;
+  }
+
+  if (payment === "paid") {
+    await pool.query(
+      `UPDATE orders SET payment_status = 'paid',
+        paid_at = COALESCE(paid_at, CURRENT_TIMESTAMP),
+        updated_at = CURRENT_TIMESTAMP
+       WHERE id = ANY($1::int[])`,
+      [allowed]
+    );
+  } else {
+    await pool.query(
+      `UPDATE orders SET payment_status = 'unpaid', paid_at = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ANY($1::int[])`,
+      [allowed]
+    );
+  }
+  setFlash(
+    req,
+    `${allowed.length} order${allowed.length === 1 ? "" : "s"} marked as ${payment}`
+  );
+  res.redirect(returnTo);
 });
 
 app.post("/invoices/:id/number", requireAuth, blockDriver, async (req, res) => {
@@ -1902,9 +1957,12 @@ function invoicesTable(
   if (rows.length === 0) return '<p class="empty">No orders found.</p>';
   const returnAttr = escapeHtml(returnTo);
   return `
-    <table class="data-table">
+    <table class="data-table" id="invoices-table">
       <thead>
         <tr>
+          <th class="invoice-check-col">
+            <input type="checkbox" id="invoice-select-all" aria-label="Select all orders">
+          </th>
           <th>Order</th>
           <th>Customer</th>
           <th>Date</th>
@@ -1923,6 +1981,9 @@ function invoicesTable(
             const paymentLabel = isPaid ? "Paid" : "Unpaid";
             return `
           <tr>
+            <td class="invoice-check-col">
+              <input type="checkbox" name="order_ids" value="${escapeHtml(o.id)}" class="invoice-row-check" aria-label="Select order ${escapeHtml(o.id)}">
+            </td>
             <td>#${escapeHtml(o.id)}</td>
             <td>${escapeHtml(o.customer_name)}${
               o.lead_name ? `<div class="muted small">${escapeHtml(o.lead_name)}</div>` : ""
@@ -1930,25 +1991,18 @@ function invoicesTable(
             <td>${escapeHtml(date)}</td>
             <td>Rs ${escapeHtml(Number(o.order_value || 0).toLocaleString())}</td>
             <td>
-              <form method="post" action="/invoices/${o.id}/number" class="invoice-number-form" data-order-id="${escapeHtml(o.id)}">
-                <input type="hidden" name="return_to" value="${returnAttr}">
+              <div class="invoice-number-form" data-order-id="${escapeHtml(o.id)}">
                 <input type="text" name="invoice_number" value="${escapeHtml(o.invoice_number || "")}" maxlength="50" placeholder="e.g. INV-104" autocomplete="off" aria-label="Invoice number for order ${escapeHtml(o.id)}">
-                <button type="submit" class="button small secondary">Save</button>
+                <button type="button" class="button small secondary invoice-number-save">Save</button>
                 <span class="invoice-save-status" aria-live="polite"></span>
-              </form>
+              </div>
             </td>
             <td><span class="status ${paymentClass}">${escapeHtml(paymentLabel)}</span></td>
             <td class="actions">
               ${
                 isPaid
-                  ? `<form method="post" action="/orders/${o.id}/mark-unpaid" class="inline">
-                       <input type="hidden" name="return_to" value="${returnAttr}">
-                       <button type="submit" class="button small secondary">Mark unpaid</button>
-                     </form>`
-                  : `<form method="post" action="/orders/${o.id}/mark-paid" class="inline">
-                       <input type="hidden" name="return_to" value="${returnAttr}">
-                       <button type="submit" class="button small success">Mark paid</button>
-                     </form>`
+                  ? `<button type="submit" formaction="/orders/${o.id}/mark-unpaid" formmethod="post" class="button small secondary">Mark unpaid</button>`
+                  : `<button type="submit" formaction="/orders/${o.id}/mark-paid" formmethod="post" class="button small success">Mark paid</button>`
               }
               <a href="/orders/${o.id}/edit" class="button small">Edit order</a>
             </td>

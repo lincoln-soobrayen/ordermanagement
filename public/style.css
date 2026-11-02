@@ -596,6 +596,37 @@ form select {
   min-height: 0;
 }
 
+.invoice-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.invoice-bulk-count {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.invoice-check-col {
+  width: 2.25rem;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.invoice-check-col input {
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+}
+
 .invoice-number-form {
   display: flex;
   flex-wrap: wrap;

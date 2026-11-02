@@ -8,7 +8,7 @@ export async function authenticateUser(
   password: string
 ): Promise<User | null> {
   const result = await pool.query(
-    "SELECT id, email, password_hash, name, role, is_active, created_at, updated_at FROM users WHERE email = $1 AND is_active = true",
+    "SELECT id, email, password_hash, name, role, is_active, commission_rate_percent, created_at, updated_at FROM users WHERE email = $1 AND is_active = true",
     [email]
   );
   const user = result.rows[0];
@@ -23,6 +23,7 @@ export async function authenticateUser(
     name: user.name,
     role: user.role,
     is_active: user.is_active,
+    commission_rate_percent: Number(user.commission_rate_percent ?? 10),
     created_at: user.created_at,
     updated_at: user.updated_at,
   };

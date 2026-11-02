@@ -331,7 +331,25 @@ export async function initDb(): Promise<void> {
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'salesperson',
       ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true,
-      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS commission_rate_percent NUMERIC(5, 2) NOT NULL DEFAULT 10
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS commission_payments (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount NUMERIC(12, 2) NOT NULL,
+        paid_on DATE NOT NULL DEFAULT CURRENT_DATE,
+        notes TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_commission_payments_user_paid
+      ON commission_payments(user_id, paid_on DESC);
     `);
 
     await client.query(`
@@ -590,6 +608,17 @@ export interface User {
   name: string;
   role: string;
   is_active: boolean;
+  commission_rate_percent: number;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface CommissionPayment {
+  id: number;
+  user_id: number;
+  amount: number;
+  paid_on: Date;
+  notes: string | null;
+  created_by: number | null;
+  created_at: Date;
 }

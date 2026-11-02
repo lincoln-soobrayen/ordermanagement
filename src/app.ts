@@ -1510,6 +1510,209 @@ app.post("/invoices/:id/number", requireAuth, blockDriver, async (req, res) => {
   res.redirect(returnTo);
 });
 
+app.get("/commission", requireAuth, blockDriver, async (req, res) => {
+  const admin = isAdmin(req);
+  const salespeople = (
+    await pool.query(
+      `SELECT id, name, commission_rate_percent FROM users
+       WHERE role IN ('salesperson', 'admin') AND is_active = true
+       ORDER BY name`
+    )
+  ).rows as { id: number; name: string; commission_rate_percent: string | number }[];
+
+  let targetId = req.session.user!.id;
+  if (admin) {
+    const requested = parseInt(String(req.query.user_id || ""), 10);
+    if (requested && salespeople.some((u) => u.id === requested)) {
+      targetId = requested;
+    } else if (!salespeople.some((u) => u.id === targetId) && salespeople[0]) {
+      targetId = salespeople[0].id;
+    }
+  }
+
+  const target = (
+    await pool.query(
+      `SELECT id, name, role, commission_rate_percent FROM users WHERE id = $1`,
+      [targetId]
+    )
+  ).rows[0] as
+    | { id: number; name: string; role: string; commission_rate_percent: string | number }
+    | undefined;
+
+  if (!target || (!admin && target.id !== req.session.user!.id)) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+
+  const rate = Number(target.commission_rate_percent ?? 10);
+  const marginResult = await pool.query(
+    `SELECT COALESCE(SUM((oi.unit_price - COALESCE(oi.unit_cost, 0)) * oi.quantity_kg), 0) AS margin
+     FROM orders o
+     JOIN order_items oi ON oi.order_id = o.id
+     WHERE o.user_id = $1
+       AND o.status != 'cancelled'
+       AND COALESCE(o.payment_status, 'unpaid') = 'paid'
+       AND NOT (${SAMPLE_ORDER_SQL})`,
+    [targetId]
+  );
+  const orderMargin = Number(marginResult.rows[0]?.margin || 0);
+  const totalCommission = orderMargin * (rate / 100);
+
+  const receivedResult = await pool.query(
+    `SELECT COALESCE(SUM(amount), 0) AS received FROM commission_payments WHERE user_id = $1`,
+    [targetId]
+  );
+  const totalReceived = Number(receivedResult.rows[0]?.received || 0);
+  const remaining = totalCommission - totalReceived;
+
+  const payments = await pool.query(
+    `SELECT cp.id, cp.amount, cp.paid_on, cp.notes, u.name AS created_by_name
+     FROM commission_payments cp
+     LEFT JOIN users u ON u.id = cp.created_by
+     WHERE cp.user_id = $1
+     ORDER BY cp.paid_on DESC, cp.id DESC`,
+    [targetId]
+  );
+
+  const today = new Date().toISOString().slice(0, 10);
+  const salespersonOptions = salespeople
+    .map(
+      (u) =>
+        `<option value="${u.id}" ${u.id === targetId ? "selected" : ""}>${escapeHtml(u.name)}</option>`
+    )
+    .join("");
+
+  res.send(
+    renderPage(
+      "Commission",
+      `
+      <div class="page-title-row">
+        <h1>Commission</h1>
+      </div>
+      ${
+        admin
+          ? `<div class="toolbar">
+        <form method="get" class="filters">
+          <label>Salesperson
+            <select name="user_id" onchange="this.form.submit()">${salespersonOptions}</select>
+          </label>
+          <noscript><button type="submit">View</button></noscript>
+        </form>
+      </div>`
+          : ""
+      }
+      <p class="muted">Margin on paid orders × ${escapeHtml(rate)}% for ${escapeHtml(target.name)}</p>
+      <section class="stats">
+        <div class="card highlight"><strong>Rs ${escapeHtml(Number(totalCommission).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Total commission</span></div>
+        <div class="card"><strong>Rs ${escapeHtml(Number(totalReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Received</span></div>
+        <div class="card"><strong>Rs ${escapeHtml(Number(remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Remaining</span></div>
+        <div class="card"><strong>Rs ${escapeHtml(Number(orderMargin).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Order margin (paid)</span></div>
+      </section>
+
+      <section>
+        <h2>Record payment received</h2>
+        <form method="post" action="/commission/payments" class="form-grid">
+          <input type="hidden" name="user_id" value="${escapeHtml(targetId)}">
+          <label>Date *<input type="date" name="paid_on" value="${escapeHtml(today)}" required></label>
+          <label>Amount (Rs) *<input type="number" name="amount" step="0.01" min="0.01" required placeholder="0.00"></label>
+          <label class="full">Notes<input type="text" name="notes" placeholder="Optional"></label>
+          <div class="actions">
+            <button type="submit">Add payment</button>
+          </div>
+        </form>
+      </section>
+
+      <section>
+        <h2>Payment history</h2>
+        ${
+          payments.rows.length === 0
+            ? `<p class="empty">No commission payments recorded yet.</p>`
+            : `<div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Date</th><th>Amount</th><th>Notes</th><th>Recorded by</th><th></th></tr></thead>
+            <tbody>
+              ${payments.rows
+                .map((p) => {
+                  const d = p.paid_on ? new Date(p.paid_on).toLocaleDateString() : "";
+                  return `<tr>
+                    <td>${escapeHtml(d)}</td>
+                    <td>Rs ${escapeHtml(Number(p.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</td>
+                    <td>${escapeHtml(p.notes || "—")}</td>
+                    <td>${escapeHtml(p.created_by_name || "—")}</td>
+                    <td class="actions">
+                      <form method="post" action="/commission/payments/${escapeHtml(p.id)}/delete" class="inline">
+                        <input type="hidden" name="user_id" value="${escapeHtml(targetId)}">
+                        <button type="submit" class="button small danger" onclick="return confirm('Delete this payment?')">Delete</button>
+                      </form>
+                    </td>
+                  </tr>`;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>`
+        }
+      </section>`,
+      req
+    )
+  );
+});
+
+app.post("/commission/payments", requireAuth, blockDriver, async (req, res) => {
+  const admin = isAdmin(req);
+  let userId = parseInt(String(req.body.user_id || ""), 10);
+  if (!admin) userId = req.session.user!.id;
+  if (!userId || (!admin && userId !== req.session.user!.id)) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  const target = await pool.query(
+    `SELECT id FROM users WHERE id = $1 AND role IN ('salesperson', 'admin')`,
+    [userId]
+  );
+  if (!target.rows.length) {
+    setFlash(req, "Invalid salesperson", "error");
+    res.redirect("/commission");
+    return;
+  }
+  const amount = parseFloat(String(req.body.amount || ""));
+  const paidOn = String(req.body.paid_on || "").trim();
+  const notes = String(req.body.notes || "").trim() || null;
+  if (!Number.isFinite(amount) || amount <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(paidOn)) {
+    setFlash(req, "Enter a valid date and amount", "error");
+    res.redirect(admin ? `/commission?user_id=${userId}` : "/commission");
+    return;
+  }
+  await pool.query(
+    `INSERT INTO commission_payments (user_id, amount, paid_on, notes, created_by)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, amount, paidOn, notes, req.session.user!.id]
+  );
+  setFlash(req, "Commission payment recorded");
+  res.redirect(admin ? `/commission?user_id=${userId}` : "/commission");
+});
+
+app.post("/commission/payments/:id/delete", requireAuth, blockDriver, async (req, res) => {
+  const paymentId = parseInt(req.params.id, 10);
+  const admin = isAdmin(req);
+  const payment = (
+    await pool.query(`SELECT id, user_id FROM commission_payments WHERE id = $1`, [paymentId])
+  ).rows[0] as { id: number; user_id: number } | undefined;
+  if (!payment) {
+    setFlash(req, "Payment not found", "error");
+    res.redirect("/commission");
+    return;
+  }
+  if (!admin && payment.user_id !== req.session.user!.id) {
+    res.status(403).send(renderPage("Access Denied", "<h1>Access Denied</h1>", req));
+    return;
+  }
+  await pool.query(`DELETE FROM commission_payments WHERE id = $1`, [paymentId]);
+  setFlash(req, "Payment deleted");
+  const returnUser = parseInt(String(req.body.user_id || payment.user_id), 10);
+  res.redirect(admin ? `/commission?user_id=${returnUser}` : "/commission");
+});
+
 app.get("/deliveries", requireAuth, async (req, res) => {
   const { status, region, q } = req.query as { status?: string; region?: string; q?: string };
   // Salespeople share the delivery board; drivers only see orders assigned to them.
@@ -2123,21 +2326,24 @@ app.get("/users/new", requireAuth, blockDriver, requireAdmin, (req, res) => {
 });
 
 app.post("/users", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const { name, email, password, role, is_active } = req.body;
+  const { name, email, password, role, is_active, commission_rate_percent } = req.body;
   const safeRole = USER_ROLES.some((r) => r.value === role) ? role : "salesperson";
   const hash = await hashPassword(password);
+  const rate = parseCommissionRate(commission_rate_percent);
   await pool.query(
-    "INSERT INTO users (name, email, password_hash, role, is_active) VALUES ($1, $2, $3, $4, $5)",
-    [name, email, hash, safeRole, is_active === "on"]
+    `INSERT INTO users (name, email, password_hash, role, is_active, commission_rate_percent)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [name, email, hash, safeRole, is_active === "on", rate]
   );
   setFlash(req, "User created");
   res.redirect("/users");
 });
 
 app.get("/users/:id/edit", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const result = await pool.query("SELECT id, name, email, role, is_active FROM users WHERE id = $1", [
-    req.params.id,
-  ]);
+  const result = await pool.query(
+    "SELECT id, name, email, role, is_active, commission_rate_percent FROM users WHERE id = $1",
+    [req.params.id]
+  );
   const user = result.rows[0];
   if (!user) {
     res.status(404).send(renderPage("Not Found", "<h1>User not found</h1>", req));
@@ -2161,7 +2367,7 @@ app.get("/users/:id/edit", requireAuth, blockDriver, requireAdmin, async (req, r
 });
 
 app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req, res) => {
-  const { name, email, password, role, is_active } = req.body;
+  const { name, email, password, role, is_active, commission_rate_percent } = req.body;
   const updates: (string | number | boolean | null)[] = [];
   const fields: string[] = [];
   let paramIndex = 1;
@@ -2182,6 +2388,8 @@ app.post("/users/:id/update", requireAuth, blockDriver, requireAdmin, async (req
     fields.push(`role = $${paramIndex++}`);
     updates.push(role);
   }
+  fields.push(`commission_rate_percent = $${paramIndex++}`);
+  updates.push(parseCommissionRate(commission_rate_percent));
   fields.push(`is_active = $${paramIndex++}`);
   updates.push(is_active === "on");
   fields.push(`updated_at = CURRENT_TIMESTAMP`);
@@ -2237,16 +2445,27 @@ function roleLabel(role: string | undefined): string {
   return USER_ROLES.find((r) => r.value === role)?.label || role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+function parseCommissionRate(raw: unknown): number {
+  const n = parseFloat(String(raw ?? ""));
+  if (!Number.isFinite(n) || n < 0) return 10;
+  return Math.min(100, Math.round(n * 100) / 100);
+}
+
 function userFormFields(user: Partial<User>): string {
   const roleOptions = USER_ROLES.map(
     (r) =>
       `<option value="${escapeHtml(r.value)}" ${user.role === r.value ? "selected" : ""}>${escapeHtml(r.label)}</option>`
   ).join("");
+  const rate =
+    user.commission_rate_percent != null && Number.isFinite(Number(user.commission_rate_percent))
+      ? Number(user.commission_rate_percent)
+      : 10;
   return `
     <label>Name * <input type="text" name="name" value="${escapeHtml(user.name)}" required></label>
     <label>Email * <input type="email" name="email" value="${escapeHtml(user.email)}" required></label>
     <label>Password ${user.id ? "(leave blank to keep unchanged)" : "*"}<input type="password" name="password" ${user.id ? "" : "required"}></label>
     <label>Role *<select name="role" required>${roleOptions}</select></label>
+    <label>Commission % <input type="number" name="commission_rate_percent" value="${escapeHtml(rate)}" min="0" max="100" step="0.01"></label>
     <label class="full">
       <input type="checkbox" name="is_active" ${user.is_active !== false ? "checked" : ""}> Active
     </label>

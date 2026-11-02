@@ -57,6 +57,7 @@ function sideMenu(
           { href: "/follow-ups", icon: "📞", label: "Follow-ups", badge: followUpsDue },
           { href: "/orders", icon: "📦", label: "Orders" },
           { href: "/invoices", icon: "🧾", label: "Invoices" },
+          { href: "/commission", icon: "💸", label: "Commission" },
           { href: "/pos", icon: "🛒", label: "POS" },
           { href: "/deliveries", icon: "🚚", label: "Deliveries" },
           { href: "/products", icon: "🛍", label: "Products" },

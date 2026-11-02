@@ -1540,16 +1540,16 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
   }
 
   const marginResult = await pool.query(
-    `SELECT COALESCE(SUM((oi.unit_price - COALESCE(oi.unit_cost, 0)) * oi.quantity_kg), 0) AS margin
+    `SELECT COALESCE(SUM((oi.unit_price - COALESCE(oi.unit_cost, p.cost_price)) * oi.quantity_kg), 0) AS margin
      FROM orders o
      JOIN order_items oi ON oi.order_id = o.id
+     JOIN products p ON oi.product_id = p.id
      WHERE o.user_id = $1
        AND o.status != 'cancelled'
-       AND COALESCE(o.payment_status, 'unpaid') = 'paid'
        AND NOT (${SAMPLE_ORDER_SQL})`,
     [targetId]
   );
-  // Commission = full margin on paid, non-sample orders for this salesperson.
+  // Commission = full margin on all non-cancelled, non-sample orders (same math as Monthly Margin).
   const totalCommission = Number(marginResult.rows[0]?.margin || 0);
 
   const receivedResult = await pool.query(
@@ -1595,7 +1595,7 @@ app.get("/commission", requireAuth, blockDriver, async (req, res) => {
       </div>`
           : ""
       }
-      <p class="muted">Paid-order margin for ${escapeHtml(target.name)} (samples excluded). Balance = total margin − payments.</p>
+      <p class="muted">Margin on all non-cancelled orders for ${escapeHtml(target.name)} (samples excluded). Balance = total margin − payments.</p>
       <section class="stats">
         <div class="card"><strong>Rs ${escapeHtml(Number(totalCommission).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Total margin</span></div>
         <div class="card"><strong>Rs ${escapeHtml(Number(totalReceived).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</strong><span>Payments</span></div>
